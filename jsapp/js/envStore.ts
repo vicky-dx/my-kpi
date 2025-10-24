@@ -21,6 +21,7 @@ export interface EnvironmentResponse {
   interface_languages: string[][]
   submission_placeholder: string
   use_team_label: boolean
+  usage_limit_enforcement: boolean
   frontend_min_retry_time: number
   frontend_max_retry_time: number
   asr_mt_features_enabled: boolean
@@ -43,6 +44,7 @@ export interface EnvironmentResponse {
   terms_of_service__sitewidemessage__exists: boolean
   open_rosa_server: string
   project_history_log_lifespan: number
+  allow_self_account_deletion: boolean
 }
 
 /*
@@ -108,6 +110,7 @@ export class EnvStoreData {
   public submission_placeholder = ''
   public use_team_label = true
   public asr_mt_features_enabled = false
+  public usage_limit_enforcement = false
   public mfa_localized_help_text = ''
   public mfa_enabled = false
   public mfa_per_user_availability = false
@@ -127,6 +130,7 @@ export class EnvStoreData {
   public enable_password_entropy_meter = false
   public terms_of_service__sitewidemessage__exists = false
   public open_rosa_server = ''
+  public allow_self_account_deletion = true
 
   getProjectMetadataField(fieldName: ProjectMetadataFieldKey): EnvStoreFieldItem | boolean {
     for (const f of this.project_metadata_fields) {
@@ -207,6 +211,7 @@ class EnvStore {
     this.data.user_metadata_fields = response.user_metadata_fields
     this.data.submission_placeholder = response.submission_placeholder
     this.data.use_team_label = response.use_team_label
+    this.data.usage_limit_enforcement = response.usage_limit_enforcement
     this.data.mfa_localized_help_text = response.mfa_localized_help_text
     this.data.mfa_enabled = response.mfa_enabled
     this.data.mfa_per_user_availability = response.mfa_per_user_availability
@@ -217,6 +222,10 @@ class EnvStore {
     this.data.free_tier_thresholds = response.free_tier_thresholds
     this.data.free_tier_display = response.free_tier_display
     this.data.open_rosa_server = response.open_rosa_server
+
+    if (response.allow_self_account_deletion) {
+      this.data.allow_self_account_deletion = response.allow_self_account_deletion
+    }
 
     if (response.sector_choices) {
       this.data.sector_choices = response.sector_choices.map(this.nestedArrToChoiceObjs)

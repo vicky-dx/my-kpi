@@ -122,7 +122,7 @@ INSTALLED_APPS = (
     'kobo.apps.service_health',
     'kobo.apps.subsequences',
     'constance',
-    'kobo.apps.hook',
+    'kobo.apps.hook.apps.HookAppConfig',
     'django_celery_beat',
     'corsheaders',
     'kobo.apps.external_integrations.ExternalIntegrationsAppConfig',
@@ -130,9 +130,10 @@ INSTALLED_APPS = (
     'kobo.apps.help',
     'trench',
     'kobo.apps.accounts.mfa.apps.MfaAppConfig',
-    'kobo.apps.languages.LanguageAppConfig',
-    'kobo.apps.project_views.ProjectViewAppConfig',
+    'kobo.apps.project_views.apps.ProjectViewAppConfig',
+    'kobo.apps.languages.apps.LanguageAppConfig',
     'kobo.apps.audit_log.AuditLogAppConfig',
+    'kobo.apps.data_collectors.DataCollectorsConfig',
     'kobo.apps.mass_emails.MassEmailsConfig',
     'kobo.apps.trackers.TrackersConfig',
     'kobo.apps.trash_bin.TrashBinAppConfig',
@@ -142,16 +143,17 @@ INSTALLED_APPS = (
     'kobo.apps.openrosa.apps.viewer.app.ViewerConfig',
     'kobo.apps.openrosa.apps.main.app.MainConfig',
     'kobo.apps.openrosa.apps.api',
-    'guardian',
+    'kobo.apps.openrosa.apps.apps.OpenRosaAppConfig',
     'kobo.apps.openrosa.libs',
     'kobo.apps.project_ownership.app.ProjectOwnershipAppConfig',
     'kobo.apps.long_running_migrations.app.LongRunningMigrationAppConfig',
+    'kobo.apps.user_reports.apps.UserReportsConfig',
+    'drf_spectacular',
 )
 
 MIDDLEWARE = [
     'kobo.apps.service_health.middleware.HealthCheckMiddleware',
     'kobo.apps.openrosa.koboform.redirect_middleware.ConditionalRedirects',
-    'kobo.apps.openrosa.apps.main.middleware.RevisionMiddleware',
     'django_dont_vary_on.middleware.RemoveUnneededVaryHeadersMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
@@ -309,6 +311,11 @@ CONSTANCE_CONFIG = {
         False,
         'Require MFA for superusers with a usable password',
     ),
+    'USAGE_LIMIT_ENFORCEMENT': (
+        env.bool('USAGE_LIMIT_ENFORCEMENT', False),
+        'For Stripe-enabled instances, determines whether usage limits will be enforced'
+        'by blocking submissions/NLP actions or deleting stored files.',
+    ),
     'ASR_MT_INVITEE_USERNAMES': (
         '',
         'List of invited usernames, one per line, who will have access to NLP '
@@ -416,6 +423,11 @@ CONSTANCE_CONFIG = {
     'IMPORT_TASK_DAYS_RETENTION': (
         90,
         'Number of days to keep import tasks',
+        'positive_int',
+    ),
+    'SUBMISSION_HISTORY_GRACE_PERIOD': (
+        180,
+        'Number of days to keep submission history',
         'positive_int',
     ),
     'FREE_TIER_THRESHOLDS': (
@@ -642,6 +654,10 @@ CONSTANCE_CONFIG = {
         'List (one per line) users who will be sent test emails when using the \n'
         '"test_users" query for MassEmailConfigs',
     ),
+    'ALLOW_SELF_ACCOUNT_DELETION': (
+        False,
+        'Allow users to delete their own account.',
+    ),
 }
 
 CONSTANCE_ADDITIONAL_FIELDS = {
@@ -712,6 +728,7 @@ CONSTANCE_CONFIG_FIELDSETS = {
         'ORGANIZATION_INVITE_EXPIRY',
         'MASS_EMAIL_ENQUEUED_RECORD_EXPIRY',
         'MASS_EMAIL_TEST_EMAILS',
+        'USAGE_LIMIT_ENFORCEMENT',
     ),
     'Rest Services': (
         'ALLOW_UNSECURED_HOOK_ENDPOINTS',
@@ -770,10 +787,12 @@ CONSTANCE_CONFIG_FIELDSETS = {
         'PROJECT_TRASH_GRACE_PERIOD',
         'LIMIT_ATTACHMENT_REMOVAL_GRACE_PERIOD',
         'AUTO_DELETE_ATTACHMENTS',
+        'ALLOW_SELF_ACCOUNT_DELETION',
     ),
     'Regular maintenance settings': (
         'ASSET_SNAPSHOT_DAYS_RETENTION',
         'IMPORT_TASK_DAYS_RETENTION',
+        'SUBMISSION_HISTORY_GRACE_PERIOD',
     ),
     'Tier settings': (
         'FREE_TIER_THRESHOLDS',
@@ -795,17 +814,13 @@ class DoNotUseRunner:
 
 TEST_RUNNER = __name__ + '.DoNotUseRunner'
 
-# The backend that handles user authentication must match KoBoCAT's when
-# sharing sessions. ModelBackend does not interfere with object-level
-# permissions: it always denies object-specific requests (see
-# https://github.com/django/django/blob/1.7/django/contrib/auth/backends.py#L44).
-# KoBoCAT also lists ModelBackend before
-# guardian.backends.ObjectPermissionBackend.
+# ModelBackend does not interfere with object-level permissions: it always denies
+# object-specific requests (see
+# https://github.com/django/django/blob/1.7/django/contrib/auth/backends.py#L44 ).
 AUTHENTICATION_BACKENDS = (
     'kpi.backends.ModelBackend',
     'kpi.backends.ObjectPermissionBackend',
     'allauth.account.auth_backends.AuthenticationBackend',
-    'kobo.apps.openrosa.libs.backends.ObjectPermissionBackend',
 )
 
 ROOT_URLCONF = 'kobo.urls'
@@ -983,14 +998,141 @@ REST_FRAMEWORK = {
         'kpi.authentication.OAuth2Authentication',
     ],
     'DEFAULT_RENDERER_CLASSES': [
-       'rest_framework.renderers.JSONRenderer',
-       'rest_framework.renderers.BrowsableAPIRenderer',
-       'kpi.renderers.XMLRenderer',
+        'rest_framework.renderers.JSONRenderer',
+        # "BasicHTMLRenderer" must always come after JSONRenderer
+        'kpi.renderers.BasicHTMLRenderer',
     ],
     'DEFAULT_VERSIONING_CLASS': 'kpi.versioning.APIAutoVersioning',
     # Cannot be placed in kpi.exceptions.py because of circular imports
     'EXCEPTION_HANDLER': 'kpi.utils.drf_exceptions.custom_exception_handler',
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_PARENT_LOOKUP_KWARG_NAME_PREFIX': 'uid_',
 }
+
+# Settings for the API documentation using drf-spectacular
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'KoboToolbox Primary API',
+    'DESCRIPTION': (
+        'This page documents all KoboToolbox API endpoints, except for those '
+        'implementing the OpenRosa protocol, which are [documented separately](/api/openrosa/docs/).'  # noqa
+        '\n\n'
+        'The endpoints are grouped by area of intended use. Each category contains '
+        'related endpoints, with detailed documentation on usage and configuration. '
+        'Use this as a reference to quickly find the right endpoint for managing '
+        'projects, forms, data, permissions, integrations, logs, and organizational '
+        'resources.\n\n'
+        '**General note**: All projects (whether deployed or draft), as well as all '
+        'library content (questions, blocks, templates, and collections) in the '
+        'user-facing application are represented in the API as "assets".'
+    ),
+    'VERSION': '2.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'SWAGGER_UI_FAVICON_HREF': '/static/favicon.png',
+    'SWAGGER_UI_SETTINGS': {
+        'filter': True,
+        'docExpansion': None,  # collapse all by default
+    },
+    'AUTHENTICATION_WHITELIST': [
+        'kpi.authentication.BasicAuthentication',
+        'kpi.authentication.TokenAuthentication',
+    ],
+    'ENUM_NAME_OVERRIDES': {
+        'InviteStatusChoicesEnum': 'kobo.apps.organizations.models.OrganizationInviteStatusChoices.choices',  # noqa
+        'InviteeRoleEnum': 'kpi.schema_extensions.v2.members.schema.ROLE_CHOICES_PAYLOAD_ENUM',  # noqa
+        'MemberRoleEnum': 'kpi.schema_extensions.v2.members.schema.ROLE_CHOICES_ENUM',
+        'StripeProductType': 'kpi.schema_extensions.v2.stripe.schema.PRODUCT_TYPE_ENUM',
+        'StripePriceType': 'kpi.schema_extensions.v2.stripe.schema.PRICE_TYPE_ENUM',
+        'StripeIntervalEnum': 'kpi.schema_extensions.v2.stripe.schema.INTERVAL_ENUM',
+        'StripeUsageType': 'kpi.schema_extensions.v2.stripe.schema.USAGE_TYPE_ENUM',
+    },
+    # We only want to blacklist BasicHTMLRenderer, but nothing like RENDERER_WHITELIST
+    # exists 🤦
+    # List all the renderers that are used by documented API
+    'RENDERER_WHITELIST': [
+        'rest_framework.renderers.JSONRenderer',
+        'rest_framework.renderers.StaticHTMLRenderer',
+        'kpi.renderers.MediaFileRenderer',
+        'kpi.renderers.MP3ConversionRenderer',
+        'kpi.renderers.OpenRosaRenderer',
+        'kpi.renderers.OpenRosaFormListRenderer',
+        'kpi.renderers.OpenRosaManifestRenderer',
+        'kpi.renderers.SSJsonRenderer',
+        'kpi.renderers.SubmissionGeoJsonRenderer',
+        'kpi.renderers.DoNothingRenderer',
+        'kpi.renderers.SubmissionXLSXRenderer',
+        'kpi.renderers.SubmissionCSVRenderer',
+        'kpi.renderers.SubmissionXMLRenderer',
+        'kpi.renderers.XMLRenderer',
+        'kpi.renderers.XFormRenderer',
+        'kpi.renderers.XlsRenderer',
+        'kobo.apps.openrosa.libs.renderers.renderers.XLSRenderer',
+        'kobo.apps.openrosa.libs.renderers.renderers.XLSXRenderer',
+        'kobo.apps.openrosa.libs.renderers.renderers.CSVRenderer',
+        'kobo.apps.openrosa.libs.renderers.renderers.RawXMLRenderer',
+        'kobo.apps.openrosa.libs.renderers.renderers.TemplateXMLRenderer',
+    ],
+    'TAGS': [
+        {
+            'name': 'Manage projects and library content',
+            'description': (
+                'Create, organize, and manage projects, assets '
+                '(projects/library content), and tags',
+            ),
+        },
+        {
+            'name': 'Form content',
+            'description': (
+                'Export and preview assets (projects/library content) in different '
+                'formats'
+            ),
+        },
+        {
+            'name': 'Survey data',
+            'description': 'View, edit, validate, export, and report collected data',
+        },
+        {
+            'name': 'Survey data - Rest Services',
+            'description': 'Configure and manage webhooks for survey data integrations',
+        },
+        {
+            'name': 'Manage permissions',
+            'description': (
+                'Assign, clone, and bulk-manage project and asset '
+                '(projects/library content) permissions'
+            ),
+        },
+        {
+            'name': 'Logging',
+            'description': 'Project history logs, access logs, Rest Service hook logs',
+        },
+        {
+            'name': 'Library collections',
+            'description': 'Subscribe to and manage shared library collections',
+        },
+        {
+            'name': 'Server logs (superusers)',
+            'description': 'View server-wide logs',
+        },
+        {
+            'name': 'User / team / organization / usage',
+            'description': 'Manage users, orgs, invites, roles, and usage tracking',
+        },
+        {
+            'name': 'Other',
+            'description': 'Languages, available permissions, other',
+        },
+    ],
+}
+
+SPECTACULAR_OPENROSA_TITLE = 'KoboToolbox OpenRosa API'
+
+SPECTACULAR_OPENROSA_DESCRIPTION = (
+    'Welcome to the documentation for the KoboToolbox OpenRosa API. Data collection '
+    'clients, including KoboCollect and web forms, use the API endpoints described '
+    'here to retrieve surveys and upload submissions.\n\n'
+    'Our separate documentation of the primary KoboToolbox API endpoints, used to '
+    'manage projects and data, can be found [here](/api/v2/docs/).'
+)
 
 OPENROSA_REST_FRAMEWORK = {
 
@@ -1265,6 +1407,11 @@ CELERY_BEAT_SCHEDULE = {
     'delete-daily-xform-submissions-counter': {
         'task': 'kobo.apps.openrosa.apps.logger.tasks.delete_daily_counters',
         'schedule': crontab(hour=0, minute=0),
+        'options': {'queue': 'kobocat_queue'},
+    },
+    'delete-expired-instance-history-records': {
+        'task': 'kobo.apps.openrosa.apps.logger.tasks.delete_expired_instance_history_records',  # noqa
+        'schedule': crontab(hour=1, minute=0),
         'options': {'queue': 'kobocat_queue'}
     },
     # Schedule every 30 minutes
@@ -1292,12 +1439,17 @@ CELERY_BEAT_SCHEDULE = {
         'options': {'queue': 'kpi_low_priority_queue'}
     },
     # Schedule every 30 minutes
-    # ToDo: Uncomment when the task for auto-cleanup of attachments is ready (DEV-240)
-    # 'attachment-cleanup-for-users-exceeding-limits': {
-    #     'task': 'kobo.apps.trash_bin.tasks.attachment.schedule_auto_attachment_cleanup_for_users',  # noqa
-    #     'schedule': crontab(minute='*/30'),
-    #     'options': {'queue': 'kpi_low_priority_queue'}
-    # },
+    'attachment-cleanup-for-users-exceeding-limits': {
+        'task': 'kobo.apps.trash_bin.tasks.attachment.schedule_auto_attachment_cleanup_for_users',  # noqa
+        'schedule': crontab(minute='*/30'),
+        'options': {'queue': 'kpi_low_priority_queue'}
+    },
+    # Schedule every 30 minutes
+    'refresh-user-report-snapshot': {
+        'task': 'kobo.apps.user_reports.tasks.refresh_user_report_snapshots',
+        'schedule': crontab(minute='*/30'),
+        'options': {'queue': 'kpi_low_priority_queue'},
+    },
     # Schedule every day at midnight UTC
     'project-ownership-garbage-collector': {
         'task': 'kobo.apps.project_ownership.tasks.garbage_collector',
@@ -1337,15 +1489,17 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'kobo.apps.mass_emails.tasks.generate_mass_email_user_lists',
         'schedule': crontab(minute=0),
         'options': {'queue': 'kpi_queue'},
-    }
+    },
 }
 
 if STRIPE_ENABLED:
     # Schedule to run once per celery timeout
     # with a five minute buffer
+    minute_interval = (CELERY_TASK_TIME_LIMIT + (60 * 5)) // 60
+
     CELERY_BEAT_SCHEDULE['update-exceeded-limit-counters'] = {
         'task': 'kobo.apps.stripe.tasks.update_exceeded_limit_counters',
-        'schedule': timedelta(seconds=CELERY_TASK_TIME_LIMIT + (60 * 5)),
+        'schedule': crontab(minute='*/' + str(minute_interval)),
         'options': {'queue': 'kpi_low_priority_queue'},
     }
 
@@ -1359,10 +1513,6 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
 }
 
 CELERY_TASK_DEFAULT_QUEUE = 'kpi_queue'
-
-if 'KOBOCAT_URL' in os.environ:
-    SYNC_KOBOCAT_PERMISSIONS = (
-        os.environ.get('SYNC_KOBOCAT_PERMISSIONS', 'True') == 'True')
 
 CELERY_BROKER_URL = os.environ.get(
     'CELERY_BROKER_URL',
@@ -1653,9 +1803,8 @@ if GIT_REV['branch'] == 'HEAD':
 Since this project handles user creation, we must handle the model-level
 permission assignment that would've been done by KoBoCAT's user post_save
 signal handler. Here we record the content types of the models listed in KC's
-set_api_permissions_for_user(). Verify that this list still matches that
-function if you experience permission-related problems. See
-https://github.com/kobotoolbox/kobocat/blob/main/onadata/libs/utils/user_auth.py.
+deprecated function set_api_permissions_for_user.
+TODO: This is being refactored and is pending to clean up
 """
 KOBOCAT_DEFAULT_PERMISSION_CONTENT_TYPES = [
     # Each tuple must be (app_label, model_name)
@@ -1856,9 +2005,6 @@ USE_THOUSAND_SEPARATOR = True
 
 DIGEST_NONCE_BACKEND = 'kobo.apps.openrosa.apps.django_digest_backends.cache.RedisCacheNonceStorage'  # noqa
 
-# Needed to get ANONYMOUS_USER = -1
-GUARDIAN_GET_INIT_ANONYMOUS_USER = 'kobo.apps.openrosa.apps.main.models.user_profile.get_anonymous_user_instance'  # noqa
-
 KPI_HOOK_ENDPOINT_PATTERN = '/api/v2/assets/{asset_uid}/hook-signal/'
 
 # TODO Validate if `'PKCE_REQUIRED': False` is required in KPI
@@ -1926,10 +2072,6 @@ SUPPORTED_MEDIA_UPLOAD_TYPES = [
     'application/geo+json',
 ]
 
-# Silence Django Guardian warning. Authentication backend is hooked, but
-# Django Guardian does not recognize it because it is extended
-SILENCED_SYSTEM_CHECKS = ['guardian.W001']
-
 DIGEST_LOGIN_FACTORY = 'django_digest.NoEmailLoginFactory'
 
 # Admins will not be explicitly granted these permissions, (i.e., not referenced
@@ -1957,6 +2099,8 @@ LOG_DELETION_BATCH_SIZE = 1000
 USER_ASSET_ORG_TRANSFER_BATCH_SIZE = 1000
 SUBMISSION_DELETION_BATCH_SIZE = 1000
 LONG_RUNNING_MIGRATION_BATCH_SIZE = 2000
+VERSION_DELETION_BATCH_SIZE = 1000
 
 # Number of stuck tasks should be restarted at a time
 MAX_RESTARTED_TASKS = 100
+MAX_RESTARTED_TRANSFERS = 20

@@ -18,7 +18,6 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as t
 from rest_framework import serializers
 from rest_framework.pagination import _positive_int as positive_int
-from rest_framework.reverse import reverse
 from shortuuid import ShortUUID
 
 from kobo.apps.openrosa.apps.logger.models.attachment import Attachment
@@ -38,6 +37,7 @@ from kpi.models.paired_data import PairedData
 from kpi.utils.django_orm_helper import UpdateJSONFieldAttributes
 from kpi.utils.log import logging
 from kpi.utils.submission import get_attachment_filenames_and_xpaths
+from kpi.utils.urls import versioned_reverse
 from kpi.utils.xml import (
     edit_submission_xml,
     fromstring_preserve_root_xmlns,
@@ -85,10 +85,6 @@ class BaseDeploymentBackend(abc.ABC):
     @property
     def backend_response(self):
         return self.get_data('backend_response', {})
-
-    @abc.abstractmethod
-    def bulk_assign_mapped_perms(self):
-        pass
 
     def bulk_update_submissions(
         self, data: dict, user: settings.AUTH_USER_MODEL, **kwargs
@@ -215,9 +211,9 @@ class BaseDeploymentBackend(abc.ABC):
     def calculated_submission_count(self, user: settings.AUTH_USER_MODEL, **kwargs):
         pass
 
-    @abc.abstractmethod
     def connect(self, active=False):
-        pass
+        if self.asset.data_collector_group_id is not None:
+            self.create_enketo_survey_links_for_data_collectors()
 
     def copy_submission_extras(self, origin_uuid: str, dest_uuid: str):
         """
@@ -232,6 +228,15 @@ class BaseDeploymentBackend(abc.ABC):
             duplicated_extras = copy.deepcopy(original_extras.content)
             duplicated_extras['submission'] = dest_uuid
             self.asset.update_submission_extra(duplicated_extras)
+
+    def create_enketo_survey_links_for_data_collectors(self):
+        data_collector_tokens = list(
+            self.asset.data_collector_group.data_collectors.values_list(
+                'token', flat=True
+            )
+        )
+        for token in data_collector_tokens:
+            self.set_data_collector_enketo_links(token)
 
     def delete(self):
         self.asset._deployment_data.clear()  # noqa
@@ -342,7 +347,6 @@ class BaseDeploymentBackend(abc.ABC):
         submission_id: int,
         user: settings.AUTH_USER_MODEL,
         format_type: str = SUBMISSION_FORMAT_TYPE_JSON,
-        request: Optional['rest_framework.request.Request'] = None,
         **mongo_query_params: dict
     ) -> Union[dict, str, None]:
         """
@@ -367,7 +371,6 @@ class BaseDeploymentBackend(abc.ABC):
                 user,
                 format_type,
                 [int(submission_id)],
-                request,
                 **mongo_query_params
             )
         )
@@ -383,7 +386,6 @@ class BaseDeploymentBackend(abc.ABC):
         user: settings.AUTH_USER_MODEL,
         format_type: str = SUBMISSION_FORMAT_TYPE_JSON,
         submission_ids: list = [],
-        request: Optional['rest_framework.request.Request'] = None,
         **mongo_query_params
     ) -> Union[Iterator[dict], Iterator[str]]:
         """
@@ -412,6 +414,11 @@ class BaseDeploymentBackend(abc.ABC):
         pass
 
     @property
+    @abc.abstractmethod
+    def is_encrypted(self) -> bool:
+        pass
+
+    @property
     def last_submission_time(self):
         return self._last_submission_time()
 
@@ -431,13 +438,12 @@ class BaseDeploymentBackend(abc.ABC):
     def redeploy(self, active: bool = None):
         pass
 
-    def remove_from_kc_only_flag(self, *args, **kwargs):
-        # TODO: This exists only to support KoBoCAT (see #1161) and should be
-        # removed, along with all places where it is called, once we remove
-        # KoBoCAT's ability to assign permissions (kobotoolbox/kobocat#642)
+    def remove_enketo_survey_links_for_data_collectors(self, tokens):
+        for token in tokens:
+            self.remove_data_collector_enketo_links(token)
 
-        # Do nothing, without complaint, so that callers don't have to worry
-        # about whether the back end is KoBoCAT or something else
+    @abc.abstractmethod
+    def remove_data_collector_enketo_links(self, token):
         pass
 
     @abc.abstractmethod
@@ -478,6 +484,10 @@ class BaseDeploymentBackend(abc.ABC):
 
     @abc.abstractmethod
     def set_asset_uid(self, **kwargs) -> bool:
+        pass
+
+    @abc.abstractmethod
+    def set_data_collector_enketo_links(self, token):
         pass
 
     @abc.abstractmethod
@@ -638,7 +648,8 @@ class BaseDeploymentBackend(abc.ABC):
         # We want to return a 500.
         try:
             permission_filters = self.asset.get_filters_for_partial_perm(
-                user.pk, perm=partial_perm)
+                user.pk, perm=partial_perm
+            )
         except ValueError:
             raise ValueError('Invalid `user_id` param')
 
@@ -806,13 +817,15 @@ class BaseDeploymentBackend(abc.ABC):
     def _inject_properties(
         self,
         submission: dict,
-        request: 'rest_framework.request.Request',
         all_attachment_xpaths: list[str],
     ) -> dict:
         submission = self._rewrite_json_attachment_urls(
-            submission, request, all_attachment_xpaths
+            submission, all_attachment_xpaths
         )
         submission = self._inject_root_uuid(submission)
+        submission['_validation_status'] = (
+            submission.get('_validation_status', None) or {}
+        )
         return submission
 
     def _inject_root_uuid(self, submission: dict) -> dict:
@@ -829,10 +842,9 @@ class BaseDeploymentBackend(abc.ABC):
     def _rewrite_json_attachment_urls(
         self,
         submission: dict,
-        request: 'rest_framework.request.Request',
         all_attachment_xpaths: list[str],
     ) -> dict:
-        if not request or '_attachments' not in submission:
+        if '_attachments' not in submission:
             return submission
 
         filenames_and_xpaths = get_attachment_filenames_and_xpaths(
@@ -859,20 +871,19 @@ class BaseDeploymentBackend(abc.ABC):
                 # Add uid to attachment data
                 attachment['uid'] = attachment_map.get(attachment['id'])
 
-            kpi_url = reverse(
+            kpi_url = versioned_reverse(
                 'attachment-detail',
                 args=(
                     self.asset.uid,
                     submission['_id'],
                     attachment['uid'],
                 ),
-                request=request,
             )
             key = f'download_url'
             attachment[key] = kpi_url
             if attachment['mimetype'].startswith('image/'):
                 for suffix in settings.THUMB_CONF.keys():
-                    kpi_url = reverse(
+                    kpi_url = versioned_reverse(
                         'attachment-thumb',
                         args=(
                             self.asset.uid,
@@ -880,7 +891,6 @@ class BaseDeploymentBackend(abc.ABC):
                             attachment['uid'],
                             suffix,
                         ),
-                        request=request,
                     )
                     key = f'download_{suffix}_url'
                     attachment[key] = kpi_url

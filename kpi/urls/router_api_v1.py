@@ -1,4 +1,4 @@
-# coding: utf-8
+from django.urls import path
 from rest_framework_extensions.routers import ExtendedDefaultRouter
 
 from kobo.apps.hook.views.v1.hook import HookViewSet
@@ -13,7 +13,6 @@ from kpi.views.v1 import (
     ExportTaskViewSet,
     ImportTaskViewSet,
     ObjectPermissionViewSet,
-    SitewideMessageViewSet,
     SubmissionViewSet,
     TagViewSet,
     UserAssetSubscriptionViewSet,
@@ -54,13 +53,35 @@ router_api_v1.register(r'asset_snapshots', AssetSnapshotViewSet)
 router_api_v1.register(
     r'asset_subscriptions', UserAssetSubscriptionViewSet)
 router_api_v1.register(r'users', UserViewSet, basename='user-kpi')
-router_api_v1.register(r'tags', TagViewSet)
+router_api_v1.register(r'tags', TagViewSet, basename='tags')
 router_api_v1.register(r'permissions', ObjectPermissionViewSet)
 router_api_v1.register(r'reports', ReportsViewSet, basename='reports')
 router_api_v1.register(r'imports', ImportTaskViewSet)
 router_api_v1.register(r'exports', ExportTaskViewSet)
-router_api_v1.register(r'sitewide_messages', SitewideMessageViewSet)
 
 router_api_v1.register(r'authorized_application/users',
                        AuthorizedApplicationUserViewSet,
                        basename='authorized_applications')
+
+
+# Create aliases here instead of using complex regex patterns in the `url_path`
+# parameter of the @action decorator. DRF and drf-spectacular struggle to interpret
+# them correctly, often resulting in broken routes and schema generation errors.
+enketo_url_aliases = [
+    path(
+        'assets/<uid_asset>/submissions/<pk>/edit/',
+        SubmissionViewSet.as_view({'get': 'enketo_edit'}),
+        name='submission-enketo-edit-legacy',
+    ),
+    path(
+        'assets/<uid_asset>/submissions/<pk>/enketo/redirect/edit/',
+        SubmissionViewSet.as_view({'get': 'enketo_edit'}),
+        name='submission-enketo-edit-redirect',
+    ),
+    path(
+        'assets/<uid_asset>/submissions/<pk>/enketo/redirect/view/',
+        SubmissionViewSet.as_view({'get': 'enketo_view'}),
+        name='submission-enketo-view-redirect',
+    ),
+]
+urls_patterns = router_api_v1.urls + enketo_url_aliases

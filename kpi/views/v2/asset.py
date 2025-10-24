@@ -6,8 +6,10 @@ from operator import itemgetter
 from django.db.models import Count
 from django.http import Http404
 from django.shortcuts import get_object_or_404
+from drf_spectacular.utils import OpenApiExample, extend_schema, extend_schema_view
 from rest_framework import exceptions, renderers, status
 from rest_framework.decorators import action
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework_extensions.mixins import NestedViewSetMixin
 
@@ -40,7 +42,35 @@ from kpi.permissions import (
     ReportPermission,
     get_perm_name,
 )
-from kpi.renderers import AssetJsonRenderer, SSJsonRenderer, XFormRenderer, XlsRenderer
+from kpi.renderers import BasicHTMLRenderer, SSJsonRenderer, XFormRenderer, XlsRenderer
+from kpi.schema_extensions.v2.assets.schema import (
+    ASSET_CLONE_FROM_SCHEMA,
+    ASSET_CONTENT_SCHEMA,
+    ASSET_ENABLED_SCHEMA,
+    ASSET_FIELDS_SCHEMA,
+    ASSET_NAME_SCHEMA,
+    ASSET_SETTINGS_SCHEMA,
+    ASSET_TYPE_SCHEMA,
+    BULK_ACTION_SCHEMA,
+    BULK_ASSET_UIDS_SCHEMA,
+    BULK_CONFIRM_SCHEMA,
+)
+from kpi.schema_extensions.v2.assets.serializers import (
+    AssetBulkRequest,
+    AssetBulkResponse,
+    AssetContentResponse,
+    AssetCreateRequest,
+    AssetHashResponse,
+    AssetMetadataResponse,
+    AssetPatchRequest,
+    AssetReportResponse,
+    AssetValidContentResponse,
+)
+from kpi.schema_extensions.v2.deployments.serializers import (
+    DeploymentCreateRequest,
+    DeploymentPatchRequest,
+    DeploymentResponse,
+)
 from kpi.serializers.v2.asset import (
     AssetBulkActionsSerializer,
     AssetListSerializer,
@@ -52,9 +82,215 @@ from kpi.utils.bugfix import repair_file_column_content_and_save
 from kpi.utils.hash import calculate_hash
 from kpi.utils.kobo_to_xlsform import to_xlsform_structure
 from kpi.utils.object_permission import get_database_user, get_objects_for_user
+from kpi.utils.schema_extensions.examples import generate_example_from_schema
+from kpi.utils.schema_extensions.markdown import read_md
+from kpi.utils.schema_extensions.response import (
+    open_api_200_ok_response,
+    open_api_201_created_response,
+    open_api_204_empty_response,
+    open_api_http_example_response,
+)
 from kpi.utils.ss_structure_to_mdtable import ss_structure_to_mdtable
 
 
+@extend_schema(
+    tags=['Manage projects and library content'],
+)
+@extend_schema_view(
+    bulk=extend_schema(
+        description=read_md('kpi', 'assets/bulk.md'),
+        request={'application/json': AssetBulkRequest},
+        responses=open_api_200_ok_response(
+            AssetBulkResponse(),
+            require_auth=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+        examples=[
+            OpenApiExample(
+                name='Perform action on one or more asset',
+                value={
+                    'asset_uids': generate_example_from_schema(BULK_ASSET_UIDS_SCHEMA),
+                    'action': generate_example_from_schema(BULK_ACTION_SCHEMA),
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                name='Perform bulk on ALL asset',
+                value={
+                    'confirm': generate_example_from_schema(BULK_CONFIRM_SCHEMA),
+                    'action': generate_example_from_schema(BULK_ACTION_SCHEMA),
+                },
+                request_only=True,
+            ),
+        ],
+    ),
+    content=extend_schema(
+        description=read_md('kpi', 'assets/content.md'),
+        request={},
+        responses=open_api_200_ok_response(
+            AssetContentResponse(),
+            validate_payload=False,
+            require_auth=False,
+            raise_access_forbidden=False,
+        ),
+    ),
+    create=extend_schema(
+        description=read_md('kpi', 'assets/create.md'),
+        request={'application/json': AssetCreateRequest},
+        responses=open_api_201_created_response(
+            AssetSerializer(),
+            raise_not_found=False,
+            raise_access_forbidden=False,
+        ),
+        examples=[
+            OpenApiExample(
+                name='Creating an asset',
+                value={
+                    'name': generate_example_from_schema(ASSET_NAME_SCHEMA),
+                    'settings': generate_example_from_schema(ASSET_SETTINGS_SCHEMA),
+                    'asset_type': generate_example_from_schema(ASSET_TYPE_SCHEMA),
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                name='Cloning an asset',
+                value={
+                    'name': generate_example_from_schema(ASSET_NAME_SCHEMA),
+                    'clone_from': generate_example_from_schema(ASSET_CLONE_FROM_SCHEMA),
+                    'asset_type': generate_example_from_schema(ASSET_TYPE_SCHEMA),
+                },
+                request_only=True,
+            ),
+        ],
+    ),
+    destroy=extend_schema(
+        description=read_md('kpi', 'assets/delete.md'),
+        responses=open_api_204_empty_response(
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    ),
+    deployment=extend_schema(tags=['Manage projects and library content']),
+    hash=extend_schema(
+        description=read_md('kpi', 'assets/hash.md'),
+        responses=open_api_200_ok_response(
+            AssetHashResponse,
+            raise_access_forbidden=False,
+            raise_not_found=False,
+            validate_payload=False,
+        ),
+    ),
+    list=extend_schema(
+        description=read_md('kpi', 'assets/list.md'),
+        responses=open_api_200_ok_response(
+            AssetSerializer,
+            require_auth=False,
+            raise_not_found=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    ),
+    metadata=extend_schema(
+        description=read_md('kpi', 'assets/metadata.md'),
+        responses=open_api_200_ok_response(
+            AssetMetadataResponse(),
+            require_auth=False,
+            raise_not_found=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    ),
+    partial_update=extend_schema(
+        description=read_md('kpi', 'assets/patch.md'),
+        request={'application/json': AssetPatchRequest},
+        responses=open_api_200_ok_response(
+            AssetSerializer(),
+            raise_access_forbidden=False,
+        ),
+        examples=[
+            OpenApiExample(
+                name='Updating an asset',
+                value={
+                    'content': generate_example_from_schema(ASSET_CONTENT_SCHEMA),
+                    'name': generate_example_from_schema(ASSET_NAME_SCHEMA),
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                name='Data sharing of the project',
+                value={
+                    'enabled': generate_example_from_schema(ASSET_ENABLED_SCHEMA),
+                    'fields': generate_example_from_schema(ASSET_FIELDS_SCHEMA),
+                },
+                request_only=True,
+            ),
+        ],
+    ),
+    update=extend_schema(exclude=True),
+    reports=extend_schema(
+        description=read_md('kpi', 'assets/reports.md'),
+        request={},
+        responses=open_api_200_ok_response(
+            AssetReportResponse(),
+            require_auth=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+        tags=['Survey data'],
+    ),
+    retrieve=extend_schema(
+        description=read_md('kpi', 'assets/retrieve.md'),
+        responses=open_api_200_ok_response(
+            AssetSerializer(),
+            require_auth=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    ),
+    table_view=extend_schema(
+        description=read_md('kpi', 'assets/table_view.md'),
+        responses=open_api_http_example_response(
+            name='Table View Example',
+            summary='Expected HTML response',
+            value=read_md('kpi', 'assets/http_examples/table_example.md'),
+            require_auth=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    ),
+    valid_content=extend_schema(
+        description=read_md('kpi', 'assets/valid_content.md'),
+        responses=open_api_200_ok_response(
+            AssetValidContentResponse(),
+            require_auth=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    ),
+    xform=extend_schema(
+        description=read_md('kpi', 'assets/xform.md'),
+        responses=open_api_http_example_response(
+            name='XFORM Example',
+            summary='Expected HTML response',
+            value=read_md('kpi', 'assets/http_examples/xform_example.md'),
+            require_auth=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    ),
+    xls=extend_schema(
+        description=read_md('kpi', 'assets/xls.md'),
+        responses=open_api_http_example_response(
+            name='XLS Example',
+            summary='Expected HTML response',
+            value=read_md('kpi', 'assets/http_examples/table_example.md'),
+            require_auth=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    ),
+)
 class AssetViewSet(
     AssetViewSetListMixin,
     ObjectPermissionViewSetMixin,
@@ -62,307 +298,45 @@ class AssetViewSet(
     AuditLoggedModelViewSet,
 ):
     """
-    * Assign an asset to a collection
-      <span class='label label-warning'>
-        partially implemented
-      </span>
-    * Run a partial update of a asset <span class='label label-danger'>TODO</span>
-
-    ## List of asset endpoints
-
-    Lists the asset endpoints accessible to requesting user, for anonymous access
-    a list of public data endpoints is returned.
-
-    <pre class="prettyprint">
-    <b>GET</b> /api/v2/assets/
-    </pre>
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/
-
-    Search can be made with `q` parameter.
-    Search filters can be returned with results by passing `metadata=on` to querystring.
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/?metadata=on
-    >       {
-    >           "count": 0
-    >           "next": ...
-    >           "previous": ...
-    >           "results": []
-    >           "metadata": {
-    >               "languages": [],
-    >               "countries": [],
-    >               "sectors": [],
-    >               "organizations": []
-    >           }
-    >       }
-
-    Look at [README](https://github.com/kobotoolbox/kpi#searching-assets)
-    for more details.
-
-    Results can be sorted with `ordering` parameter.
-    Allowed fields are:
-
-    - `asset_type`
-    - `date_modified`
-    - `name`
-    - `owner__username`
-    - `subscribers_count`
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/?ordering=-name
-
-    _Note: Collections can be displayed first with parameter `collections_first`_
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/?collections_first=true&ordering=-name
-
-    <hr>
-
-    Perform bulk actions on assets
-
-    Actions available:
-
-    - `archive`
-    - `delete`
-    - `unarchive`
-    - `undelete` (superusers only)
-
-    <pre class="prettyprint">
-    <b>POST</b> /api/v2/assets/bulk/
-    </pre>
-
-    > Example
-    >
-    >       curl -X POST https://[kpi]/api/v2/assets/bulk/
-
-    > **Payload to preform bulk actions on one or more assets**
-    >
-    >        {
-    >           "payload": {
-    >               "asset_uids": [{string}, ...],
-    >               "action": {string},
-    >           }
-    >        }
-
-    > **Payload to preform bulk actions on ALL assets for authenticated user**
-    >
-    >       {
-    >           "payload": {
-    >               "confirm": true,
-    >               "action": {string}
-    >           }
-    >       }
-
-
-    <hr>
-
-    Get a hash of all `version_id`s of assets.
-    Useful to detect any changes in assets with only one call to `API`
-
-    <pre class="prettyprint">
-    <b>GET</b> /api/v2/assets/hash/
-    </pre>
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/hash/
-
-    ## CRUD
-
-    * `uid` - is the unique identifier of a specific asset
-
-    Retrieves current asset
-    <pre class="prettyprint">
-    <b>GET</b> /api/v2/assets/<code>{uid}</code>/
-    </pre>
-
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/
-
-    Creates or clones an asset.
-    <pre class="prettyprint">
-    <b>POST</b> /api/v2/assets/
-    </pre>
-
-
-    > Example
-    >
-    >       curl -X POST https://[kpi]/api/v2/assets/
-
-
-    > **Payload to create a new asset**
-    >
-    >        {
-    >           "name": {string},
-    >           "settings": {
-    >               "description": {string},
-    >               "sector": {string},
-    >               "country": {string},
-    >               "share-metadata": {boolean}
-    >           },
-    >           "asset_type": {string}
-    >        }
-
-    > **Payload to clone an asset**
-    >
-    >       {
-    >           "clone_from": {string},
-    >           "name": {string},
-    >           "asset_type": {string}
-    >       }
-
-    where `asset_type` must be one of these values:
-
-    * block (can be cloned to `block`, `question`, `survey`, `template`)
-    * question (can be cloned to `question`, `survey`, `template`)
-    * survey (can be cloned to `block`, `question`, `survey`, `template`)
-    * template (can be cloned to `survey`, `template`)
-
-    Settings are cloned only when type of assets are `survey` or `template`.
-    In that case, `share-metadata` is not preserved.
-
-    When creating a new `block` or `question` asset, settings are not saved either.
-
-    ### Counts
-
-    Retrieves total and daily counts of submissions
-    <pre class="prettyprint">
-    <b>GET</b> /api/v2/assets/{uid}/counts/
-    </pre>
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/counts/
-
-    uses the `days` query to get the daily counts from the last x amount of days.
-    Default amount is 30 days
-    <pre class="prettyprint">
-    <b>GET</b> /api/v2/assets/{uid}/counts/?days=7
-    </pre>
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/counts/?days=7
-
-
-    ### Data
-
-    Retrieves data
-    <pre class="prettyprint">
-    <b>GET</b> /api/v2/assets/{uid}/data/
-    </pre>
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/data/
-
-    ### Deployment
-
-    Retrieves the existing deployment, if any.
-    <pre class="prettyprint">
-    <b>GET</b> /api/v2/assets/{uid}/deployment/
-    </pre>
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/deployment/
-
-    Creates a new deployment, but only if a deployment does not exist already.
-    <pre class="prettyprint">
-    <b>POST</b> /api/v2/assets/{uid}/deployment/
-    </pre>
-
-    > Example
-    >
-    >       curl -X POST https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/deployment/
-
-    Updates the `active` field of the existing deployment.
-    <pre class="prettyprint">
-    <b>PATCH</b> /api/v2/assets/{uid}/deployment/
-    </pre>
-
-    > Example
-    >
-    >       curl -X PATCH https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/deployment/
-
-    Overwrites the entire deployment, including the form contents, but does not change the deployment's identifier
-    <pre class="prettyprint">
-    <b>PUT</b> /api/v2/assets/{uid}/deployment/
-    </pre>
-
-    > Example
-    >
-    >       curl -X PUT https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/deployment/
-
-    ### Reports
-
-    Returns the submission data for all deployments of a survey.
-    This data is grouped by answers, and does not show the data for individual submissions.
-    The endpoint will return a <b>404 NOT FOUND</b> error if the asset is not deployed and will only return the data for the most recently deployed version.
-
-    <pre class="prettyprint">
-    <b>GET</b> /api/v2/assets/{uid}/reports/
-    </pre>
-
-    > Example
-    >
-    >       curl -X GET https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/reports/
-
-    ### Data sharing
-
-    Control sharing of submission data from this project to other projects
-
-    <pre class="prettyprint">
-    <b>PATCH</b> /api/v2/assets/{uid}/
-    </pre>
-
-    > Example
-    >
-    >       curl -X PATCH https://[kpi]/api/v2/assets/aSAvYreNzVEkrWg5Gdcvg/
-    >
-    > **Payload**
-    >
-    >        {
-    >           "data_sharing": {
-    >              "enabled": true,
-    >              "fields": []
-    >           }
-    >        }
-    >
-
-    * `fields`: Optional. List of questions whose responses will be shared. If
-        missing or empty, all responses will be shared. Questions must be
-        identified by full group path separated by slashes, e.g.
-        `group/subgroup/question_name`.
-
-    >
-    > Response
-    >
-    >       HTTP 200 Ok
-    >        {
-    >           ...
-    >           "data_sharing": {
-    >              "enabled": true,
-    >              "fields": []
-    >           }
-    >        }
-    >
-
-
-    ### CURRENT ENDPOINT
+    ViewSet for managing the current user's assets
+
+    Available actions:
+    - list           → GET /api/v2/assets/
+    - create         → POST /api/v2/assets/
+    - retrieve       → GET /api/v2/assets/{uid_asset}/
+    - patch          → PATCH /api/v2/assets/{uid_asset}/
+    - delete         → DELETE /api/v2/assets/{uid_asset}/
+    - content        → GET /api/v2/assets/{uid_asset}/content/
+    - reports        → GET /api/v2/assets/{uid_asset}/reports/
+    - table_view     → GET /api/v2/assets/{uid_asset}/table_view/
+    - valid_content  → GET /api/v2/assets/{uid_asset}/valid_content/
+    - xform          → GET /api/v2/assets/{uid_asset}/xform/
+    - xls            → GET /api/v2/assets/{uid_asset}/xls/
+    - bulk           → POST /api/v2/assets/bulk/
+    - hash           → GET /api/v2/assets/hash/
+    - metadata       → GET /api/v2/assets/metadata/
+
+    Documentation:
+    - docs/api/v2/assets/list.md
+    - docs/api/v2/assets/create.md
+    - docs/api/v2/assets/retrieve.md
+    - docs/api/v2/assets/patch.md
+    - docs/api/v2/assets/delete.md
+    - docs/api/v2/assets/content.md
+    - docs/api/v2/assets/reports.md
+    - docs/api/v2/assets/table_view.md
+    - docs/api/v2/assets/valid_content.md
+    - docs/api/v2/assets/xform.md
+    - docs/api/v2/assets/xls.md
+    - docs/api/v2/assets/bulk.md
+    - docs/api/v2/assets/hash.md
+    - docs/api/v2/assets/metadata.md
     """
 
     # Filtering handled by KpiObjectPermissionsFilter.filter_queryset()
     queryset = Asset.objects.all()
-
     lookup_field = 'uid'
+    lookup_url_kwarg = 'uid_asset'
     pagination_class = AssetPagination
     permission_classes = (AssetPermission,)
     ordering_fields = AssetOrderingFilter.DEFAULT_ORDERING_FIELDS + [
@@ -373,13 +347,6 @@ class AssetViewSet(
         KpiObjectPermissionsFilter,
         SearchFilter,
         AssetOrderingFilter,
-    ]
-    renderer_classes = [
-        renderers.BrowsableAPIRenderer,
-        AssetJsonRenderer,
-        SSJsonRenderer,
-        XFormRenderer,
-        XlsRenderer,
     ]
     # Terms that can be used to search and filter return values
     # from a query `q`
@@ -401,25 +368,28 @@ class AssetViewSet(
         'data_sharing',
         'content',
         'advanced_features.qual.qual_survey',
+        'owner.username',
     ]
     log_type = AuditType.PROJECT_HISTORY
 
     @action(
         detail=False,
         methods=['POST'],
-        renderer_classes=[renderers.JSONRenderer],
     )
     def bulk(self, request, *args, **kwargs):
         return Response(self._bulk_asset_actions(request.data))
 
-    @action(detail=True, renderer_classes=[renderers.JSONRenderer])
-    def content(self, request, uid):
+    @extend_schema(tags=['Form content'])
+    @action(detail=True)
+    def content(self, request, uid_asset):
         asset = self.get_object()
-        return Response({
-            'kind': 'asset.content',
-            'uid': asset.uid,
-            'data': asset.to_ss_structure(),
-        })
+        return Response(
+            {
+                'kind': 'asset.content',
+                'uid_asset': asset.uid,
+                'data': asset.to_ss_structure(),
+            }
+        )
 
     def create(self, request, *args, **kwargs):
         if CLONE_ARG_NAME in request.data:
@@ -434,17 +404,50 @@ class AssetViewSet(
             serializer.data, status=status.HTTP_201_CREATED, headers=headers
         )
 
+    @extend_schema(
+        methods=['GET'],
+        description=read_md('kpi', 'deployments/list.md'),
+        responses=open_api_200_ok_response(
+            DeploymentResponse,
+            require_auth=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    )
+    @extend_schema(
+        methods=['PATCH'],
+        description=read_md('kpi', 'deployments/update.md'),
+        request={'application/json': DeploymentPatchRequest},
+        responses=open_api_200_ok_response(
+            DeploymentResponse,
+            raise_access_forbidden=False,
+        ),
+    )
+    @extend_schema(
+        methods=['POST'],
+        description=read_md('kpi', 'deployments/create.md'),
+        request={'application/json': DeploymentCreateRequest},
+        responses=open_api_200_ok_response(
+            DeploymentResponse,
+            raise_access_forbidden=False,
+        ),
+    )
     @action(detail=True,
             methods=['get', 'post', 'patch'],
             permission_classes=[PostMappedToChangePermission])
-    def deployment(self, request, uid):
+    def deployment(self, request, uid_asset):
         """
-        A GET request retrieves the existing deployment, if any.
-        A POST request creates a new deployment, but only if a deployment does
-            not exist already.
-        A PATCH request updates the `active` field of the existing deployment.
-        A PUT request overwrites the entire deployment, including the form
-            contents, but does not change the deployment's identifier
+        ViewSet for managing the current project's deployment
+
+        Available actions:
+        - list           → GET /api/v2/assets/{uid_asset}/deployment/
+        - create         → POST /api/v2/assets/{uid_asset}/deployment/
+        - patch          → PATCH /api/v2/assets/{uid_asset}/deployment/
+
+        Documentation:
+        - docs/api/v2/deployments/list.md
+        - docs/api/v2/deployments/create.md
+        - docs/api/v2/deployments/patch.md
         """
         asset = self.get_object()
         serializer_context = self.get_serializer_context()
@@ -560,7 +563,7 @@ class AssetViewSet(
         It relies on `check_object_permissions` to validate access to the object.
         """
         try:
-            asset = Asset.objects.get(uid=self.kwargs['uid'])
+            asset = Asset.objects.get(uid=self.kwargs[self.lookup_url_kwarg])
         except Asset.DoesNotExist:
             raise Http404
 
@@ -576,6 +579,11 @@ class AssetViewSet(
         return asset
 
     def get_queryset(self, *args, **kwargs):
+
+        if self.detail:
+            # For detail views, we must explicitly bypass the NestedViewSetMixin.
+            return super(NestedViewSetMixin, self).get_queryset(*args, **kwargs)
+
         queryset = super().get_queryset(*args, **kwargs)
         if self.action == 'list':
             return queryset.model.optimize_queryset_for_list(queryset)
@@ -665,6 +673,17 @@ class AssetViewSet(
         assert self.paginator is not None
         return self.paginator.get_paginated_response(data, metadata)
 
+    def get_renderers(self):
+        if self.action == 'retrieve':
+            return [
+                JSONRenderer(),
+                BasicHTMLRenderer(),
+                SSJsonRenderer(),
+                XFormRenderer(),
+                XlsRenderer(),
+            ]
+        return super().get_renderers()
+
     def get_serializer_class(self):
         if self.action == 'list':
             return AssetListSerializer
@@ -737,7 +756,7 @@ class AssetViewSet(
             # 5) Get organization…
             if organization := getattr(self.request, 'organization', None):
                 # …from request.
-                # e.g.: /api/v2/organizations/<organization_id>/assets/`
+                # e.g.: /api/v2/organizations/<uid_organization>/assets/`
                 context_['organization'] = organization
             else:
                 # …per asset
@@ -764,8 +783,7 @@ class AssetViewSet(
         serializer = self.get_serializer(self.__filtered_queryset, many=True)
         return Response(serializer.data)
 
-    @action(detail=False, methods=['GET'],
-            renderer_classes=[renderers.JSONRenderer])
+    @action(detail=False, methods=['GET'])
     def hash(self, request):
         """
         Creates an hash of `version_id` of all accessible assets by the user.
@@ -801,8 +819,7 @@ class AssetViewSet(
                 'hash': hash_
             })
 
-    @action(detail=False, methods=['GET'],
-            renderer_classes=[renderers.JSONRenderer])
+    @action(detail=False, methods=['GET'])
     def metadata(self, request):
         queryset = self.filter_queryset(self.get_queryset())
         metadata = self.get_metadata(queryset)
@@ -839,7 +856,6 @@ class AssetViewSet(
         detail=True,
         permission_classes=[ReportPermission],
         methods=['GET'],
-        renderer_classes=[renderers.JSONRenderer],
     )
     def reports(self, request, *args, **kwargs):
         asset = self.get_object()
@@ -849,15 +865,19 @@ class AssetViewSet(
                                              context=self.get_serializer_context())
         return Response(serializer.data)
 
-    @action(detail=True, renderer_classes=[renderers.JSONRenderer])
-    def valid_content(self, request, uid):
+    @extend_schema(tags=['Form content'])
+    @action(detail=True)
+    def valid_content(self, request, uid_asset):
         asset = self.get_object()
-        return Response({
-            'kind': 'asset.valid_content',
-            'uid': asset.uid,
-            'data': to_xlsform_structure(asset.content),
-        })
+        return Response(
+            {
+                'kind': 'asset.valid_content',
+                'uid_asset': asset.uid,
+                'data': to_xlsform_structure(asset.content),
+            }
+        )
 
+    @extend_schema(tags=['Form content'])
     @action(detail=True, renderer_classes=[renderers.StaticHTMLRenderer])
     def table_view(self, request, *args, **kwargs):
         sa = self.get_object()
@@ -879,6 +899,7 @@ class AssetViewSet(
             response_data['highlighted_xform'] = highlight_xform(export.xml, **options)
         return Response(response_data, template_name='highlighted_xform.html')
 
+    @extend_schema(tags=['Form content'])
     @action(detail=True, renderer_classes=[renderers.StaticHTMLRenderer])
     def xls(self, request, *args, **kwargs):
         return self.table_view(self, request, *args, **kwargs)

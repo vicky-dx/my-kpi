@@ -115,23 +115,39 @@ urlpatterns = [
     # odk data urls
     re_path(
         r'^submission$',
-        XFormSubmissionApi.as_view({'post': 'create', 'head': 'create'}),
+        XFormSubmissionApi.as_view(
+            {'post': 'create_authenticated', 'head': 'create_authenticated'}
+        ),
         name='submissions',
     ),
-    re_path(r'^formList$', XFormListApi.as_view({'get': 'list'}), name='form-list'),
     re_path(
-        r'^(?P<username>\w+)/formList$',
-        XFormListApi.as_view({'get': 'list'}),
+        r'^formList$',
+        XFormListApi.as_view({'get': 'form_list_authenticated'}),
         name='form-list',
     ),
     re_path(
-        r'^(?P<username>\w+)/xformsManifest/(?P<pk>[\d+^/]+)$',
-        XFormListApi.as_view({'get': 'manifest'}),
-        name='manifest-url',
+        r'^(?P<username>\w+)/formList$',
+        XFormListApi.as_view({'get': 'form_list_anonymous'}),
+        name='form-list',
+    ),
+    re_path(
+        r'^collector/(?P<token>\w+)/formList$',
+        XFormListApi.as_view({'get': 'form_list_dc'}),
+        name='form-list',
     ),
     re_path(
         r'^xformsManifest/(?P<pk>[\d+^/]+)$',
-        XFormListApi.as_view({'get': 'manifest'}),
+        XFormListApi.as_view({'get': 'manifest_authenticated'}),
+        name='manifest-url',
+    ),
+    re_path(
+        r'^(?P<username>\w+)/xformsManifest/(?P<pk>[\d+^/]+)$',
+        XFormListApi.as_view({'get': 'manifest_anonymous'}),
+        name='manifest-url',
+    ),
+    re_path(
+        r'^collector/(?P<token>\w+)/xformsManifest/(?P<pk>[\d+^/]+)$',
+        XFormListApi.as_view({'get': 'manifest_dc'}),
         name='manifest-url',
     ),
     re_path(
@@ -141,6 +157,18 @@ urlpatterns = [
     ),
     re_path(
         r'^(?P<username>\w+)/xformsMedia/(?P<pk>[\d+^/]+)'
+        r'/(?P<metadata>[\d+^/.]+)\.(?P<format>[a-z0-9]+)$',
+        XFormListApi.as_view({'get': 'media'}),
+        name='xform-media',
+    ),
+    re_path(
+        r'^collector/(?P<token>\w+)/xformsMedia/(?P<pk>[\d+^/]+)'
+        r'/(?P<metadata>[\d+^/.]+)$',
+        XFormListApi.as_view({'get': 'media'}),
+        name='xform-media',
+    ),
+    re_path(
+        r'^collector/(?P<token>\w+)/xformsMedia/(?P<pk>[\d+^/]+)'
         r'/(?P<metadata>[\d+^/.]+)\.(?P<format>[a-z0-9]+)$',
         XFormListApi.as_view({'get': 'media'}),
         name='xform-media',
@@ -158,7 +186,16 @@ urlpatterns = [
     ),
     re_path(
         r'^(?P<username>\w+)/submission$',
-        XFormSubmissionApi.as_view({'post': 'create', 'head': 'create'}),
+        XFormSubmissionApi.as_view(
+            {'post': 'create_anonymous', 'head': 'create_anonymous'}
+        ),
+        name='submissions',
+    ),
+    re_path(
+        r'^collector/(?P<token>\w+)/submission$',
+        XFormSubmissionApi.as_view(
+            {'post': 'create_data_collector', 'head': 'create_data_collector'}
+        ),
         name='submissions',
     ),
     re_path(r'^(?P<username>\w+)/bulk-submission$', bulksubmission),
@@ -182,6 +219,11 @@ urlpatterns = [
         r'^(?P<username>\w+)/forms/(?P<id_string>[^/]+)/form\.json',
         download_jsonform,
         name='download_jsonform',
+    ),
+    re_path(
+        r'^collector/(?P<token>\w+)/forms/(?P<pk>[\d+^/]+)/form\.xml$',
+        XFormListApi.as_view({'get': 'retrieve'}),
+        name='download_xform',
     ),
     re_path(r'^favicon\.ico', RedirectView.as_view(url='/static/images/favicon.ico')),
 ]

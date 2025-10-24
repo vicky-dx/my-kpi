@@ -21,6 +21,7 @@ const environmentResponse: EnvironmentResponse = {
   frontend_min_retry_time: 2,
   frontend_max_retry_time: 120,
   use_team_label: true,
+  usage_limit_enforcement: false,
   free_tier_display: {
     name: null,
     feature_list: [],
@@ -439,4 +440,5 @@ const environmentResponse: EnvironmentResponse = {
   stripe_public_key: 'pk_test_qliDXQRyVGPWmsYR69tB1NPx00ndTrJfVM',
   terms_of_service__sitewidemessage__exists: false,
   open_rosa_server: 'http://kc.kobo.local',
+  allow_self_account_deletion: true,
 }

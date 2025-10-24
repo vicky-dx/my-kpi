@@ -390,6 +390,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
                 'source': 'source',
                 'asset_uid': asset.uid,
                 'log_subtype': 'project',
+                'project_owner': asset.owner.username,
             },
             date_created=yesterday,
             object_id=asset.id,
@@ -403,6 +404,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
                 'source': 'source',
                 'asset_uid': asset.uid,
                 'log_subtype': 'project',
+                'project_owner': asset.owner.username,
             },
         )
 
@@ -422,6 +424,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
                 'source': 'source',
                 'asset_uid': asset.uid,
                 'log_subtype': 'project',
+                'project_owner': asset.owner.username,
             },
             user=user,
         )
@@ -432,15 +435,16 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
 
     @data(
         # source, asset_uid, ip_address, subtype
-        ('source', 'a1234', None, 'project'),  # missing ip
-        ('source', None, '1.2.3.4', 'project'),  # missing asset_uid
-        (None, 'a1234', '1.2.3.4', 'project'),  # missing source
-        ('source', 'a1234', '1.2.3.4', None),  # missing subtype
-        ('source', 'a1234', '1.2.3.4', 'bad_type'),  # bad subtype
+        ('source', 'a1234', None, 'project', 'someuser'),  # missing ip
+        ('source', None, '1.2.3.4', 'project', 'someuser'),  # missing asset_uid
+        (None, 'a1234', '1.2.3.4', 'project', 'someuser'),  # missing source
+        ('source', 'a1234', '1.2.3.4', None, 'someuser'),  # missing subtype
+        ('source', 'a1234', '1.2.3.4', 'bad_type', 'someuser'),  # bad subtype
+        ('source', 'a1234', '1.2.3.4', 'project', None),  # missing owner
     )
     @unpack
     def test_create_project_history_log_requires_metadata_fields(
-        self, source, ip_address, asset_uid, subtype
+        self, source, ip_address, asset_uid, subtype, owner
     ):
         user = User.objects.get(username='someuser')
         asset = Asset.objects.get(pk=1)
@@ -449,6 +453,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
             'ip_address': ip_address,
             'asset_uid': asset_uid,
             'log_subtype': subtype,
+            'project_owner': owner,
         }
 
         with self.assertRaises(ValidationError):
@@ -468,7 +473,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
             )
 
     def test_create_from_related_request_object_created(self):
-        request = self._create_request(asset_uid_key='parent_lookup_asset')
+        request = self._create_request(asset_uid_key='uid_asset')
         # if an object has been created, only `updated_data` will be set
         request.updated_data = {
             'object_id': 1,
@@ -494,7 +499,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
         self.assertEqual(log.metadata['asset_uid'], 'a12345')
 
     def test_create_from_related_request_object_deleted(self):
-        request = self._create_request(asset_uid_key='parent_lookup_asset')
+        request = self._create_request(asset_uid_key='uid_asset')
         # if an object has been created, only `initial_data` will be set
         request.initial_data = {
             'object_id': 1,
@@ -518,7 +523,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
         self.assertEqual(log.metadata['asset_uid'], 'a12345')
 
     def test_create_from_related_request_object_modified(self):
-        request = self._create_request(asset_uid_key='parent_lookup_asset')
+        request = self._create_request(asset_uid_key='uid_asset')
         # if an object has been modified, both `initial_data`
         # and `updated_data` should be filled
         request.initial_data = {
@@ -550,7 +555,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
         self.assertEqual(log.metadata['asset_uid'], 'a12345')
 
     def test_create_from_related_request_no_log_created_if_no_data(self):
-        request = self._create_request(asset_uid_key='parent_lookup_asset')
+        request = self._create_request(asset_uid_key='uid_asset')
         # no `initial_data` or `updated_data` present
         ProjectHistoryLog._related_request_base(
             request,
@@ -656,7 +661,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
     def test_create_from_unexpected_anonymous_permissions(self):
         # Normal anonymous permissions tested elsewhere
         # This test is for if somehow other permissions are assigned
-        request = self._create_request(asset_uid_key='parent_lookup_asset')
+        request = self._create_request(asset_uid_key='uid_asset')
         request.updated_data = {'asset.id': 1, 'asset.owner.username': 'fred'}
         request.permissions_added = {
             # these permissions are not allowed for anonymous users,
@@ -698,7 +703,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
     def test_create_from_deployment_request(
         self, only_active_changed, is_active, has_deployment, expected_log_action
     ):
-        request = self._create_request(asset_uid_key='uid')
+        request = self._create_request(asset_uid_key='uid_asset')
 
         request.initial_data = {
             'id': 1,
@@ -758,7 +763,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
     )
     @unpack
     def test_create_from_detail_request_plumbing(self, field, expected_method):
-        request = self._create_request('uid')
+        request = self._create_request('uid_asset')
         request.initial_data = {
             'id': 1,
             'name': 'name',
@@ -767,6 +772,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
             'content': 'content',
             'advanced_features.qual.qual_survey': 'survey',
             'latest_version.uid': 'v12345',
+            'owner.username': 'someuser',
         }
         request.updated_data = {**request.initial_data, field: 'new'}
         with patch(
@@ -777,7 +783,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
         patched.assert_called_once()
 
     def test_unexpected_fields_ignored_in_detail_request(self):
-        request = self._create_request('uid')
+        request = self._create_request('uid_asset')
         request.initial_data = {
             'id': 1,
             'name': 'name',
@@ -787,6 +793,7 @@ class ProjectHistoryLogModelTestCase(BaseAuditLogTestCase):
             'advanced_features.qual.qual_survey': 'survey',
             'latest_version.uid': 'v12345',
             'something_new': 'new',
+            'owner.username': 'someuser',
         }
         request.updated_data = {**request.initial_data, 'something_new': 'i am new'}
         # no log should be created even though 'something_new' changed

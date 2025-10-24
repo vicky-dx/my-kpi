@@ -16,12 +16,13 @@ from xml.etree import ElementTree as ET
 from xml.parsers.expat import ExpatError
 from zoneinfo import ZoneInfo
 
+import constance
 from dict2xml import dict2xml
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.files.base import File
 from django.core.mail import mail_admins
-from django.db import IntegrityError, connection, transaction
+from django.db import IntegrityError, connections, transaction
 from django.db.models import Q
 from django.http import (
     Http404,
@@ -38,6 +39,7 @@ from pyxform.errors import PyXFormError
 from pyxform.xform2json import create_survey_element_from_xml
 from rest_framework.exceptions import NotAuthenticated
 
+from kobo.apps.data_collectors.authentication import DataCollectorUser
 from kobo.apps.openrosa.apps.logger.exceptions import (
     AccountInactiveError,
     ConflictingAttachmentBasenameError,
@@ -63,9 +65,8 @@ from kobo.apps.openrosa.apps.logger.models.xform import XLSFormError
 from kobo.apps.openrosa.apps.logger.signals import (
     update_xform_daily_counter,
     update_xform_monthly_counter,
-    update_xform_submission_count,
 )
-from kobo.apps.openrosa.apps.logger.utils.counters import update_storage_counters
+from kobo.apps.openrosa.apps.logger.utils.counters import update_user_counters
 from kobo.apps.openrosa.apps.logger.xform_instance_parser import (
     XFormInstanceParser,
     clean_and_parse_xml,
@@ -82,6 +83,8 @@ from kobo.apps.openrosa.libs.utils import common_tags
 from kobo.apps.openrosa.libs.utils.model_tools import queryset_iterator, set_uuid
 from kobo.apps.openrosa.libs.utils.viewer_tools import get_mongo_userform_id
 from kobo.apps.organizations.constants import UsageType
+from kobo.apps.stripe.utils.limit_enforcement import check_exceeded_limit
+from kpi.constants import PERM_ADD_SUBMISSIONS, PERM_CHANGE_SUBMISSIONS
 from kpi.deployment_backends.kc_access.storage import (
     default_kobocat_storage as default_storage,
 )
@@ -111,7 +114,7 @@ def check_submission_permissions(
 
     If the form does not require auth, anyone can submit, regardless of whether
     they are authenticated. Otherwise, if the form does require auth, the
-    user must be the owner or have CAN_ADD_SUBMISSIONS.
+    user must be the owner or have PERM_ADD_SUBMISSIONS for the xform asset.
 
     :returns: None.
     :raises: PermissionDenied based on the above criteria.
@@ -120,14 +123,13 @@ def check_submission_permissions(
     if not xform.require_auth:
         # Anonymous submissions are allowed!
         return
-
     if request and request.user.is_anonymous:
         raise NotAuthenticated
 
     if (
         request
         and xform.user != request.user
-        and not request.user.has_perm('report_xform', xform)
+        and not request.user.has_perm(PERM_ADD_SUBMISSIONS, xform.asset)
     ):
         raise PermissionDenied(t('Forbidden'))
 
@@ -182,10 +184,8 @@ def create_instance(
         date_created_override (datetime, optional): Override for the submission's
                                                     creation date.
         request (Optional[Request]): Request object used for permission checks.
-        check_usage_limits (bool, optional): For testing purposes, bypasses
-                                             checking whether asset owner
-                                             is over allowed submission/storage
-                                             limit.
+        check_usage_limits (bool, optional): Bypasses enforcement of limits for
+                                             submissions/storage.
 
     Returns:
         Instance: The updated or newly created submission instance
@@ -198,7 +198,6 @@ def create_instance(
                                         processed.
         PermissionDenied: If the submission fails permission checks.
     """
-
     if username:
         username = username.lower()
 
@@ -206,13 +205,20 @@ def create_instance(
     xml_hash = Instance.get_hash(xml)
     xform = get_xform_from_submission(xml, username, uuid)
     check_submission_permissions(request, xform)
-    if settings.STRIPE_ENABLED and check_usage_limits:
+    if (
+        settings.STRIPE_ENABLED
+        and constance.config.USAGE_LIMIT_ENFORCEMENT
+        and check_usage_limits
+    ):
         calculator = ServiceUsageCalculator(xform.user)
         balances = calculator.get_usage_balances()
         for usage_type in [UsageType.STORAGE_BYTES, UsageType.SUBMISSION]:
             balance = balances[usage_type]
             if balance and balance['exceeded']:
-                raise ExceededUsageLimitError()
+                check_exceeded_limit(xform.user, UsageType.SUBMISSION)
+                check_exceeded_limit(xform.user, UsageType.STORAGE_BYTES)
+
+                raise ExceededUsageLimitError({'type': usage_type})
 
     # get root uuid
     root_uuid, fallback_on_uuid = get_root_uuid_from_xml(xml)
@@ -245,10 +251,10 @@ def create_instance(
             else:
                 # Update Mongo via the related ParsedInstance
                 existing_instance.parsed_instance.save(asynchronous=False)
-                update_storage_counters(
-                    xform.pk,
-                    xform.user_id,
-                    total_bytes,
+                update_user_counters(
+                    existing_instance,
+                    existing_instance.xform.user_id,
+                    attachment_storage_bytes=total_bytes,
                 )
                 return existing_instance
         else:
@@ -284,13 +290,17 @@ def create_instance(
             if not created:
                 pi.save(asynchronous=False)
 
-            # Now that the slow tasks are complete, and we are (hopefully!) close to the
-            # end of the transaction, update the counters
-            update_storage_counters(
-                instance.xform_id, instance.xform.user_id, total_bytes
-            )
-
-            if getattr(instance, 'defer_counting', False):
+            # Now that the heavy tasks are done and we’re (hopefully) nearing the end
+            # of the transaction, update the counters.
+            #
+            # Keep the UserProfile update as the final step to ensure it happens
+            # right before the transaction is committed.
+            #
+            # Context: the UPDATE statement holds a row-level lock until the transaction
+            # completes. When users submit large volumes of data, multiple concurrent
+            # requests may try to update the same UserProfile, forcing them to wait
+            # until the lock is released.
+            if defer_counting := getattr(instance, 'defer_counting', False):
                 # Remove the Python-only attribute
                 del instance.defer_counting
 
@@ -306,18 +316,15 @@ def create_instance(
                     created=True,
                     xform=instance.xform,
                 )
-                update_xform_submission_count(
-                    sender=Instance,
-                    instance=instance,
-                    created=True,
-                    xform=instance.xform,
-                )
+
+            update_user_counters(
+                instance,
+                instance.xform.user_id,
+                attachment_storage_bytes=total_bytes,
+                increase_num_of_submissions=defer_counting,
+            )
 
             if settings.STRIPE_ENABLED:
-                from kobo.apps.stripe.utils.limit_enforcement import (
-                    check_exceeded_limit,
-                )
-
                 check_exceeded_limit(xform.user, UsageType.SUBMISSION)
                 check_exceeded_limit(xform.user, UsageType.STORAGE_BYTES)
 
@@ -361,7 +368,7 @@ def get_instance_lock(submission_uuid: str, xform_id: int) -> bool:
 
     try:
         with kc_transaction_atomic():
-            cur = connection.cursor()
+            cur = connections[settings.OPENROSA_DB_ALIAS].cursor()
             cur.execute('SELECT pg_try_advisory_lock(%s::bigint);', (int_lock,))
             acquired = cur.fetchone()[0]
             yield acquired
@@ -460,10 +467,17 @@ def http_open_rosa_error_handler(func, request):
     except TemporarilyUnavailableError:
         result.error = t('Temporarily unavailable')
         result.http_error_response = OpenRosaTemporarilyUnavailable(result.error)
-    except ExceededUsageLimitError:
-        result.error = t(
-            'The owner of this survey has exceeded their submission limit.'
-        )
+    except ExceededUsageLimitError as e:
+        type = e.args[0].get('type', '')
+        if type == UsageType.SUBMISSION:
+            result.error = t(
+                'The owner of this survey has exceeded their submission limit.'
+            )
+        elif type == UsageType.STORAGE_BYTES:
+            result.error = t(
+                'The owner of this survey has exceeded their storage limit.'
+            )
+
         result.http_error_response = OpenRosaResponsePaymentRequired(result.error)
     except AccountInactiveError:
         result.error = t('Account is not active')
@@ -776,23 +790,22 @@ def safe_create_instance(
 def save_attachments(
     instance: Instance,
     media_files: Generator[File],
-) -> tuple[list[Attachment], list[Attachment]]:
+) -> tuple[int, bool]:
     """
-    Return a tuple of two lists.
-    - The former is new attachments
-    - The latter is the replaced/soft-deleted attachments
+    Return a tuple.
+    - The former is the total bytes of new attachments
+    - The latter is the boolean value of whether there are new attachments
+    """
 
-    `defer_counting=False` will set a Python-only attribute of the same name on
-    any *new* `Attachment` instances created. This will prevent
-    `update_xform_attachment_storage_bytes()` and friends from doing anything,
-    which avoids locking any rows in `logger_xform` or `main_userprofile`.
-    """
     new_attachments = []
     total_bytes = 0
     has_new_attachments = False
-
     for f in media_files:
-        media_file_basename = os.path.basename(f.name)
+        # It is available, use `_raw_filename` provided by
+        # `MultiPartParserWithRawFilenames` to preserve the original filename
+        # before Django’s sanitizing process.
+        original_name = getattr(f, '_raw_filename', None) or f.name
+        media_file_basename = os.path.basename(original_name)
 
         # The basename of a (non-deleted) attachment must be unique per instance.
         existing_attachment = Attachment.objects.filter(
@@ -889,7 +902,8 @@ def get_soft_deleted_attachments(instance: Instance) -> list[Attachment]:
     queryset = Attachment.objects.filter(instance=instance).exclude(
         Q(media_file_basename__endswith='.enc')
         | Q(media_file_basename='audit.csv')
-        | Q(media_file_basename__regex=r'^\d{10,}\.(m4a|amr)$')
+        | Q(media_file_basename__regex=r'^\d{10,}\.(m4a|amr)$') # background audio file by Collect
+        | Q(media_file_basename__regex=r'^background-audio-\d{8}_\d{6}\.webm$') # background audio file by Enketo
     ).order_by('-id')
 
     latest_attachments, remaining_attachments_ids = [], []
@@ -941,16 +955,20 @@ def _get_instance(
         # edits
         check_edit_submission_permissions(request, xform)
         InstanceHistory.objects.create(
-            xml=instance.xml, xform_instance=instance, uuid=old_uuid
+            xml=instance.xml,
+            xform_instance=instance,
+            uuid=old_uuid,
+            root_uuid=instance.root_uuid,
         )
         instance.xml = xml
         instance.uuid = new_uuid
     else:
-        submitted_by = (
-            get_database_user(request.user)
-            if request and request.user.is_authenticated
-            else None
+        get_user = (
+            request
+            and request.user.is_authenticated
+            and not isinstance(request.user, DataCollectorUser)
         )
+        submitted_by = get_database_user(request.user) if get_user else None
 
         if not date_created_override:
             date_created_override = get_submission_date_from_xml(xml)
@@ -989,7 +1007,9 @@ def _has_edit_xform_permission(
         if request.user.is_superuser:
             return True
 
-        if request.user.has_perm('logger.change_xform', xform):
+        if xform.asset is None:
+            return False
+        if request.user.has_perm(PERM_CHANGE_SUBMISSIONS, xform.asset):
             return True
 
         # User's permissions have been already checked when calling KPI endpoint

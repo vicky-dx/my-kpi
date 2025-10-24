@@ -45,6 +45,8 @@ class AttachmentTrashAdminTestCase(BaseTestCase, AssetSubmissionTestMixin):
             request_author=user,
             objects_list=[{
                 'pk': attachment.pk,
+                'asset_id': self.asset.pk,
+                'asset_uid': self.asset.uid,
                 'attachment_uid': attachment.uid,
                 'attachment_basename': attachment.media_file_basename,
             }],
@@ -122,7 +124,7 @@ class AttachmentTrashAdminTestCase(BaseTestCase, AssetSubmissionTestMixin):
         submission_detail_url = reverse(
             self._get_endpoint('submission-detail'),
             kwargs={
-                'parent_lookup_asset': self.asset.uid,
+                'uid_asset': self.asset.uid,
                 'pk': self.instance.pk,
             },
         )

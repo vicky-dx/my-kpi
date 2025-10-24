@@ -4,6 +4,7 @@
  */
 
 import React from 'react'
+import { isRtlLang } from 'rtl-detect'
 
 import assetStore from '#/assetStore'
 import permConfig from '#/components/permissions/permConfig'
@@ -37,6 +38,7 @@ import envStore from '#/envStore'
 import type { IconName } from '#/k-icons'
 import sessionStore from '#/stores/session'
 import { ANON_USERNAME_URL } from '#/users/utils'
+import { currentLang, recordKeys } from '#/utils'
 
 /**
  * Removes whitespace from tags. Returns list of cleaned up tags.
@@ -143,8 +145,13 @@ export function getCountryDisplayString(asset: AssetResponse | ProjectViewAsset)
       return '-'
     }
 
-    // TODO: improve for RTL?
-    // See: https://github.com/kobotoolbox/kpi/issues/3903
+    // RTL handling
+    const isRtl = isRtlLang(currentLang())
+
+    if (isRtl) {
+      countries.reverse()
+      return countries.join('، ')
+    }
     return countries.join(', ')
   } else {
     return '-'
@@ -662,7 +669,7 @@ export function getAssetProcessingRows(assetUid: string) {
   const foundAsset = assetStore.getAsset(assetUid)
   if (foundAsset?.advanced_submission_schema?.properties) {
     const rows: string[] = []
-    Object.keys(foundAsset.advanced_submission_schema.properties).forEach((propertyName) => {
+    recordKeys(foundAsset.advanced_submission_schema.properties).forEach((propertyName) => {
       if (foundAsset.advanced_submission_schema?.properties !== undefined) {
         const propertyObj = foundAsset.advanced_submission_schema.properties[propertyName]
         // NOTE: we assume that the properties will hold only a special string

@@ -2,98 +2,63 @@ from constance import config
 from django.db import transaction
 from django.utils.timezone import now
 from django.utils.translation import gettext as t
-from rest_framework import permissions, status, viewsets
+from drf_spectacular.utils import extend_schema, extend_schema_view
+from rest_framework import permissions, serializers, status, viewsets
+from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
 from rest_framework.response import Response
 
 from kobo.apps.kobo_auth.shortcuts import User
 from kobo.apps.trash_bin.utils import move_to_trash
+from kpi.constants import ASSET_TYPE_EMPTY
+from kpi.schema_extensions.v2.me.serializers import (
+    CurrentUserDeleteRequest,
+    MeListResponse,
+)
 from kpi.serializers import CurrentUserSerializer
+from kpi.utils.schema_extensions.markdown import read_md
+from kpi.utils.schema_extensions.response import (
+    open_api_200_ok_response,
+    open_api_204_empty_response,
+)
 from kpi.versioning import APIV2Versioning
 
 
+@extend_schema(tags=['User / team / organization / usage'])
+@extend_schema_view(
+    destroy=extend_schema(
+        description=read_md('kpi', 'me/delete.md'),
+        request={'application/json': CurrentUserDeleteRequest},
+        responses=open_api_204_empty_response(
+            raise_not_found=False,
+        ),
+    ),
+    retrieve=extend_schema(
+        description=read_md('kpi', 'me/retrieve.md'),
+        responses=open_api_200_ok_response(
+            MeListResponse,
+            raise_not_found=False,
+            raise_access_forbidden=False,
+            validate_payload=False,
+        ),
+    ),
+    partial_update=extend_schema(
+        description=read_md('kpi', 'me/update.md'),
+        responses=open_api_200_ok_response(
+            MeListResponse, raise_not_found=False, raise_access_forbidden=False
+        ),
+    ),
+)
 class CurrentUserViewSet(viewsets.ModelViewSet):
     """
-    <pre class="prettyprint">
-    <b>GET</b> /me/
-    </pre>
+    Available actions:
+    - destroy               → DELETE        /me/
+    - retrieve              → GET           /me/
+    - partial_update        → PATCH         /me/
 
-    > Example
-    >
-    >       curl -X GET https://[kpi]/me/
-    >
-    >       {
-    >           "username": string,
-    >           "first_name": string,
-    >           "last_name": string,
-    >           "email": string,
-    >           "server_time": "YYYY-MM-DDTHH:MM:SSZ",
-    >           "date_joined": "YYYY-MM-DDTHH:MM:SSZ",
-    >           "projects_url": "https://[kobocat]/{username}",
-    >           "gravatar": url,
-    >           "last_login": "YYYY-MM-DDTHH:MM:SSZ",
-    >           "extra_details": {
-    >               "bio": string,
-    >               "city": string,
-    >               "name": string,
-    >               "gender": string,
-    >               "sector": string,
-    >               "country": string,
-    >               "twitter": string,
-    >               "linkedin": string,
-    >               "instagram": string,
-    >               "organization": string,
-    >               "last_ui_language": string,
-    >               "organization_website": string,
-    >               "newsletter_subscription": boolean,
-    >           },
-    >           "git_rev": {
-    >               "short": boolean,
-    >               "long": boolean,
-    >               "branch": boolean,
-    >               "tag": boolean,
-    >           },
-    >           "social_accounts": []
-    >           "accepted_tos": boolean,
-    >           "organization": {
-    >               "url": string,
-    >               "name": string,
-    >               "uid": string,
-    >           },
-    >           "extra_details__uid": string,
-    >       }
-
-    Update account details
-    <pre class="prettyprint">
-    <b>PATCH</b> /me/
-    </pre>
-
-    > Example
-    >
-    >       curl -X PATCH https://[kpi]/me/
-
-    > Payload Example
-    >
-    >       {
-    >           "first_name": "Bob"
-    >       }
-
-    Delete the entire account
-    <pre class="prettyprint">
-    <b>DELETE<b> /me/
-    </pre>
-
-    >   Example
-    >
-    >       curl -X DELETE https://[kpi]/me/
-
-    > Payload Example
-    >
-    >       {
-    >           "confirm": {user__extra_details__uid},
-    >       }
-
-
-    ### Current User Endpoint
+    Documentation:
+    - docs/api/v2/me/delete.md
+    - docs/api/v2/me/retrieve.md
+    - docs/api/v2/me/update.md
     """
     queryset = User.objects.none()
     serializer_class = CurrentUserSerializer
@@ -106,11 +71,23 @@ class CurrentUserViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         user = self.get_object()
 
+        if not config.ALLOW_SELF_ACCOUNT_DELETION:
+            raise MethodNotAllowed('DELETE')
+
+        organization = user.organization
+        if organization.is_mmo and organization.is_owner(user):
+            raise PermissionDenied(
+                'You cannot delete your own account as a multi-member organization '
+                'owner'
+            )
+
         confirm = request.data.get('confirm')
         if confirm != user.extra_details.uid:
-            return Response(
-                {'detail': t('Invalid confirmation')},
-                status=status.HTTP_400_BAD_REQUEST,
+            raise serializers.ValidationError({'detail': t('Invalid confirmation')})
+
+        if user.assets.exclude(asset_type=ASSET_TYPE_EMPTY).exists():
+            raise serializers.ValidationError(
+                {'detail': t('You still own projects. Delete or transfer them first.')}
             )
 
         user = {'pk': user.pk, 'username': user.username}

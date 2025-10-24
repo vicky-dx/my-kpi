@@ -1,6 +1,5 @@
-# coding: utf-8
-
 from django.urls import path
+from rest_framework.renderers import JSONRenderer
 from rest_framework_extensions.routers import ExtendedDefaultRouter
 
 from kobo.apps.audit_log.urls import router as audit_log_router
@@ -15,6 +14,9 @@ from kobo.apps.organizations.views import (
 )
 from kobo.apps.project_ownership.urls import router as project_ownership_router
 from kobo.apps.project_views.views import ProjectViewViewSet
+from kobo.apps.user_reports.views import UserReportsViewSet
+from kpi.constants import API_NAMESPACES
+from kpi.renderers import BasicHTMLRenderer
 from kpi.views.v2.asset import AssetViewSet
 from kpi.views.v2.asset_counts import AssetCountsViewSet
 from kpi.views.v2.asset_export_settings import AssetExportSettingsViewSet
@@ -25,17 +27,20 @@ from kpi.views.v2.asset_usage import AssetUsageViewSet
 from kpi.views.v2.asset_version import AssetVersionViewSet
 from kpi.views.v2.attachment import AttachmentViewSet
 from kpi.views.v2.attachment_delete import AttachmentDeleteViewSet
+from kpi.views.v2.authorized_application_user import AuthorizedApplicationUserViewSet
 from kpi.views.v2.data import DataViewSet
 from kpi.views.v2.export_task import ExportTaskViewSet
 from kpi.views.v2.import_task import ImportTaskViewSet
 from kpi.views.v2.paired_data import PairedDataViewset
 from kpi.views.v2.permission import PermissionViewSet
 from kpi.views.v2.service_usage import ServiceUsageViewSet
+from kpi.views.v2.tag import TagViewSet
+from kpi.views.v2.tos import TermsOfServiceViewSet
 from kpi.views.v2.user import UserViewSet
 from kpi.views.v2.user_asset_subscription import UserAssetSubscriptionViewSet
 
 
-class ExtendedDefaultRouterWithPathAliases(ExtendedDefaultRouter):
+class OpenRosaCompatibleExtendedRouter(ExtendedDefaultRouter):
     """
     Historically, all of this application's endpoints have used trailing
     slashes (the DRF default). Requests missing their trailing slashes have
@@ -52,10 +57,15 @@ class ExtendedDefaultRouterWithPathAliases(ExtendedDefaultRouter):
     def get_urls(self, *args, **kwargs):
         urls = super().get_urls(*args, **kwargs)
         names_to_alias_paths = {
-            'assetsnapshot-form-list': 'asset_snapshots/<uid>/formList',
-            'assetsnapshot-manifest': 'asset_snapshots/<uid>/manifest',
-            'assetsnapshot-submission': 'asset_snapshots/<uid>/submission',
+            'assetsnapshot-form-list': 'asset_snapshots/<uid_asset_snapshot>/formList',
+            'assetsnapshot-manifest': 'asset_snapshots/<uid_asset_snapshot>/manifest',
+            'assetsnapshot-submission': 'asset_snapshots/<uid_asset_snapshot>/submission',
         }
+
+        # Remove the original urls matching the names
+        original_urls = [url for url in urls if url.name not in names_to_alias_paths]
+
+        # Add only alias versions
         alias_urls = []
         for url in urls:
             if url.name in names_to_alias_paths:
@@ -63,15 +73,15 @@ class ExtendedDefaultRouterWithPathAliases(ExtendedDefaultRouter):
                 # only consider the first match
                 del names_to_alias_paths[url.name]
                 alias_urls.append(
-                    path(alias_paths, url.callback, name=f'{url.name}-alias')
+                    path(alias_paths, url.callback, name=f'{url.name}-openrosa')
                 )
-        urls.extend(alias_urls)
-        return urls
+        original_urls.extend(alias_urls)
+        return original_urls
 
 
-URL_NAMESPACE = 'api_v2'
+URL_NAMESPACE = API_NAMESPACES['v2']
 
-router_api_v2 = ExtendedDefaultRouterWithPathAliases()
+router_api_v2 = OpenRosaCompatibleExtendedRouter()
 asset_routes = router_api_v2.register(r'assets', AssetViewSet, basename='asset')
 
 asset_routes.register(r'counts',
@@ -163,12 +173,12 @@ router_api_v2.register(r'imports', ImportTaskViewSet)
 router_api_v2.register(r'organizations',
                        OrganizationViewSet, basename='organizations',)
 router_api_v2.register(
-    r'organizations/(?P<organization_id>[^/.]+)/members',
+    r'organizations/(?P<uid_organization>[^/.]+)/members',
     OrganizationMemberViewSet,
     basename='organization-members',
 )
 router_api_v2.register(
-    r'organizations/(?P<organization_id>[^/.]+)/invites',
+    r'organizations/(?P<uid_organization>[^/.]+)/invites',
     OrgMembershipInviteViewSet,
     basename='organization-invites',
 )
@@ -178,7 +188,11 @@ router_api_v2.register(r'project-views', ProjectViewViewSet)
 router_api_v2.register(r'service_usage',
                        ServiceUsageViewSet, basename='service-usage')
 router_api_v2.register(r'users', UserViewSet, basename='user-kpi')
-
+router_api_v2.register(r'user-reports', UserReportsViewSet, basename='user-reports')
+router_api_v2.register(r'tags', TagViewSet, basename='tags')
+router_api_v2.register(
+    r'terms-of-service', TermsOfServiceViewSet, basename='terms-of-service'
+)
 
 # Merge django apps routers with API v2 router
 # All routes are under `/api/v2/` within the same namespace.
@@ -187,9 +201,34 @@ router_api_v2.registry.extend(language_router.registry)
 router_api_v2.registry.extend(audit_log_router.registry)
 
 
-# TODO migrate ViewSet below
-# router_api_v2.register(r'sitewide_messages', SitewideMessageViewSet)
-#
-# router_api_v2.register(r'authorized_application/users',
-#                        AuthorizedApplicationUserViewSet,
-#                        basename='authorized_applications')
+router_api_v2.register(
+    r'authorized_application/users',
+    AuthorizedApplicationUserViewSet,
+    basename='authorized_applications',
+)
+
+
+# Create aliases here instead of using complex regex patterns in the `url_path`
+# parameter of the @action decorator. DRF and drf-spectacular struggle to interpret
+# them correctly, often resulting in broken routes and schema generation errors.
+enketo_url_aliases = [
+    path(
+        'assets/<uid_asset>/data/<pk>/edit/',
+        DataViewSet.as_view(
+            {'get': 'enketo_edit'}, renderer_classes=[JSONRenderer, BasicHTMLRenderer]
+        ),
+        name='submission-enketo-edit-legacy',
+    ),
+    path(
+        'assets/<uid_asset>/data/<pk>/enketo/redirect/edit/',
+        DataViewSet.as_view({'get': 'enketo_edit'}, renderer_classes=[JSONRenderer]),
+        name='submission-enketo-edit-redirect',
+    ),
+    path(
+        'assets/<uid_asset>/data/<pk>/enketo/redirect/view/',
+        DataViewSet.as_view({'get': 'enketo_view'}, renderer_classes=[JSONRenderer]),
+        name='submission-enketo-view-redirect',
+    ),
+]
+
+urls_patterns = router_api_v2.urls + enketo_url_aliases

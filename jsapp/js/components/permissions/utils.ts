@@ -13,6 +13,7 @@ import type {
 } from '#/dataInterface'
 import sessionStore from '#/stores/session'
 import { ANON_USERNAME_URL, buildUserUrl } from '#/users/utils'
+import { recordEntries, recordKeys } from '#/utils'
 import permConfig from './permConfig'
 import type {
   CheckboxNameAll,
@@ -153,28 +154,33 @@ export function isPartialByUsersFilter(filter: PartialPermissionFilter) {
 }
 
 /**
- * Finds "by users" filter inside the partial permission and returns the users
+ * Finds "by users" filters inside the partial permission and returns the users
  * list from it. If there is no "by users" filter we return `undefined`.
  */
 export function getPartialByUsersFilterList(partialPerm: PartialPermission): string[] | undefined {
-  let found: PartialPermissionFilterByUsers | undefined
+  const found: PartialPermissionFilterByUsers[] = []
 
   partialPerm.filters.forEach((filter) => {
     if (isPartialByUsersFilter(filter)) {
       // We cast the type, because we checked with `isPartialByUsersFilter`
-      found = filter as PartialPermissionFilterByUsers
+      found.push(filter as PartialPermissionFilterByUsers)
     }
   })
 
-  if (!found) {
-    return undefined
-  } else if (typeof found._submitted_by === 'string') {
-    return [found._submitted_by]
-  } else if (found._submitted_by && Array.isArray(found._submitted_by.$in)) {
-    return found._submitted_by.$in
-  }
+  let foundUsernames: string[] = []
 
-  return undefined
+  found.forEach((foundFilter) => {
+    if (typeof foundFilter._submitted_by === 'string') {
+      foundUsernames.push(foundFilter._submitted_by)
+    } else if (foundFilter._submitted_by && Array.isArray(foundFilter._submitted_by.$in)) {
+      foundUsernames = [...foundUsernames, ...foundFilter._submitted_by.$in]
+    }
+  })
+
+  if (foundUsernames.length === 0) {
+    return undefined
+  }
+  return foundUsernames
 }
 
 /**
@@ -190,7 +196,7 @@ export function hasPartialByUsers(perm: PermissionResponse) {
 
 /** Detects if given filter is of "by responses" kind. */
 export function isPartialByResponsesFilter(filter: PartialPermissionFilter) {
-  const filterKeys = Object.keys(filter)
+  const filterKeys = recordKeys(filter)
   // We are looking for an object that has some props other thane the one for
   // "by users" filter (at least one other)
   return filterKeys.some((key) => key !== '_submitted_by')
@@ -300,7 +306,7 @@ export function userHasPermForSubmission(
     // questions)
 
     // There can be only one
-    const questionPath = Object.keys(byResponsesFilter)[0]
+    const questionPath = recordKeys(byResponsesFilter)[0]
     if (!questionPath) {
       return false
     }
@@ -418,11 +424,9 @@ export function getPartialByResponsesValueName(
  */
 export function getCheckboxNameByPermission(permName: PermissionCodename): CheckboxNameAll | undefined {
   let found: CheckboxNameAll | undefined
-  for (const [checkboxName, permissionName] of Object.entries(CHECKBOX_PERM_PAIRS)) {
-    // We cast it here because for..of doesn't keep the type of the keys
-    const checkboxNameCast = checkboxName as CheckboxNameAll
+  for (const [checkboxName, permissionName] of recordEntries(CHECKBOX_PERM_PAIRS)) {
     if (permName === permissionName) {
-      found = checkboxNameCast
+      found = checkboxName
     }
   }
   return found
