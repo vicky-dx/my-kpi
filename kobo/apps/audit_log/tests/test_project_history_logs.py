@@ -20,6 +20,7 @@ from rest_framework.reverse import reverse as drf_reverse
 from kobo.apps.audit_log.audit_actions import AuditAction
 from kobo.apps.audit_log.models import ProjectHistoryLog
 from kobo.apps.audit_log.tests.test_models import BaseAuditLogTestCase
+from kobo.apps.data_collectors.models import DataCollector, DataCollectorGroup
 from kobo.apps.hook.models import Hook
 from kobo.apps.kobo_auth.shortcuts import User
 from kobo.apps.openrosa.apps.logger.models import Instance
@@ -97,22 +98,33 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         new_instance = Instance.objects.get(uuid=uuid_)
         return new_instance, submission_data
 
-    def _check_common_metadata(
-        self, metadata_dict, expected_subtype, expect_owner=False
-    ):
+    def _check_common_metadata(self, metadata_dict, expected_subtype):
         self.assertEqual(metadata_dict['asset_uid'], self.asset.uid)
         self.assertEqual(metadata_dict['ip_address'], '127.0.0.1')
         self.assertEqual(metadata_dict['source'], 'source')
         self.assertEqual(metadata_dict['log_subtype'], expected_subtype)
-        # TODO: remove this parameter when all ph logs have project owners included
-        if expect_owner:
-            self.assertEqual(metadata_dict['project_owner'], self.asset.owner.username)
+        self.assertEqual(metadata_dict['project_owner'], self.asset.owner.username)
 
     def _check_submission_log_metadata(
-        self, metadata, expected_username, expected_root_uuid
+        self, metadata, expected_username, expected_root_uuid, data_collector=None
     ):
         self.assertEqual(metadata['submission']['submitted_by'], expected_username)
         self.assertEqual(metadata['submission']['root_uuid'], expected_root_uuid)
+        if data_collector:
+            self.assertEqual(
+                metadata['submission']['data_collector_uid'], data_collector.uid
+            )
+            self.assertEqual(
+                metadata['submission']['data_collector_name'], data_collector.name
+            )
+            self.assertEqual(
+                metadata['submission']['data_collector_group_uid'],
+                data_collector.group.uid,
+            )
+            self.assertEqual(
+                metadata['submission']['data_collector_group_name'],
+                data_collector.group.name,
+            )
 
     def _base_asset_detail_endpoint_test(
         self,
@@ -121,10 +133,11 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         request_data,
         expected_action,
         use_v2=True,
-        expect_owner=False,
     ):
         url_name_prefix = 'api_v2:' if use_v2 else ''
-        url = reverse(f'{url_name_prefix}{url_name}', kwargs={'uid': self.asset.uid})
+        url = reverse(
+            f'{url_name_prefix}{url_name}', kwargs={'uid_asset': self.asset.uid}
+        )
         method = self.client.patch if patch else self.client.post
         log_metadata = self._base_project_history_log_test(
             method,
@@ -132,7 +145,6 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             request_data,
             expected_action,
             PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=expect_owner,
         )
         self.assertEqual(
             log_metadata['latest_version_uid'], self.asset.latest_version.uid
@@ -140,13 +152,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         return log_metadata
 
     def _base_project_history_log_test(
-        self,
-        method,
-        url,
-        request_data,
-        expected_action,
-        expected_subtype,
-        expect_owner=False,
+        self, method, url, request_data, expected_action, expected_subtype
     ):
         method(
             url,
@@ -163,9 +169,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         # check the log has the expected fields and metadata
         self.assertEqual(log.object_id, self.asset.id)
         self.assertEqual(log.action, expected_action)
-        self._check_common_metadata(
-            log.metadata, expected_subtype, expect_owner=expect_owner
-        )
+        self._check_common_metadata(log.metadata, expected_subtype)
         return log.metadata
 
     def _make_bulk_request(self, asset_uids, action) -> Response:
@@ -195,7 +199,6 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url_name=self.deployment_url,
             request_data=post_data,
             expected_action=AuditAction.DEPLOY,
-            expect_owner=True,
         )
 
         self.assertEqual(
@@ -215,7 +218,6 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url_name=self.deployment_url,
             request_data=request_data,
             expected_action=AuditAction.REDEPLOY,
-            expect_owner=True,
         )
 
         self.assertEqual(
@@ -234,11 +236,10 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url_name=self.deployment_url,
             request_data=request_data,
             expected_action=AuditAction.ARCHIVE,
-            expect_owner=True,
         )
         # do it again (archive an already-archived asset)
         self.client.patch(
-            reverse('api_v2:asset-deployment', kwargs={'uid': self.asset.uid}),
+            reverse('api_v2:asset-deployment', kwargs={'uid_asset': self.asset.uid}),
             data=request_data,
             format='json',
         )
@@ -259,11 +260,10 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url_name=self.deployment_url,
             request_data=request_data,
             expected_action=AuditAction.UNARCHIVE,
-            expect_owner=True,
         )
         # do it again (unarchive an already-unarchived asset)
         self.client.patch(
-            reverse('api_v2:asset-deployment', kwargs={'uid': self.asset.uid}),
+            reverse('api_v2:asset-deployment', kwargs={'uid_asset': self.asset.uid}),
             data=request_data,
             format='json',
         )
@@ -279,7 +279,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             'active': True,
         }
         self.client.patch(
-            reverse('api_v2:asset-deployment', kwargs={'uid': self.asset.uid}),
+            reverse('api_v2:asset-deployment', kwargs={'uid_asset': self.asset.uid}),
             data=request_data,
             format='json',
         )
@@ -287,7 +287,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         self.asset.deploy(backend='mock', active=True)
         # attempt to POST to a deployed asset
         self.client.post(
-            reverse('api_v2:asset-deployment', kwargs={'uid': self.asset.uid}),
+            reverse('api_v2:asset-deployment', kwargs={'uid_asset': self.asset.uid}),
             data=request_data,
             format='json',
         )
@@ -396,7 +396,9 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         url_name_prefix = 'api_v2:' if use_v2 else ''
 
         self.client.patch(
-            reverse(f'{url_name_prefix}asset-detail', kwargs={'uid': self.asset.uid}),
+            reverse(
+                f'{url_name_prefix}asset-detail', kwargs={'uid_asset': self.asset.uid}
+            ),
             data=patch_data,
             format='json',
         )
@@ -614,7 +616,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         request_data = {'advanced_features': {'qual': {'qual_survey': ['bad']}}}
         with self.assertRaises(jsonschema.exceptions.ValidationError):
             self.client.patch(
-                reverse('api_v2:asset-detail', kwargs={'uid': self.asset.uid}),
+                reverse('api_v2:asset-detail', kwargs={'uid_asset': self.asset.uid}),
                 data=request_data,
                 format='json',
             )
@@ -642,7 +644,6 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             request_data=request_data,
             expected_action=AuditAction.REGISTER_SERVICE,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
         new_hook = Hook.objects.get(name='test')
         self.assertEqual(log_metadata['hook']['uid'], new_hook.uid)
@@ -666,14 +667,13 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url=reverse(
                 f'{url_prefix}hook-detail',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
-                    'uid': new_hook.uid,
+                    'uid_asset': self.asset.uid,
+                    'uid_hook': new_hook.uid,
                 },
             ),
             request_data=request_data,
             expected_action=AuditAction.MODIFY_SERVICE,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
         self.assertEqual(log_metadata['hook']['uid'], new_hook.uid)
         self.assertEqual(log_metadata['hook']['active'], False)
@@ -695,14 +695,13 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url=reverse(
                 f'{url_prefix}hook-detail',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
-                    'uid': new_hook.uid,
+                    'uid_asset': self.asset.uid,
+                    'uid_hook': new_hook.uid,
                 },
             ),
             request_data=request_data,
             expected_action=AuditAction.DELETE_SERVICE,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
         self.assertEqual(log_metadata['hook']['uid'], new_hook.uid)
         self.assertEqual(log_metadata['hook']['active'], True)
@@ -718,7 +717,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         # so we don't have a permissions issue
         source.owner = self.asset.owner
         source.save()
-        asset_url = drf_reverse('api_v2:asset-detail', kwargs={'uid': source.uid})
+        asset_url = drf_reverse('api_v2:asset-detail', kwargs={'uid_asset': source.uid})
         request_data = {
             'fields': ['q1'],
             'filename': 'test_file',
@@ -732,7 +731,6 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             request_data=request_data,
             expected_action=AuditAction.CONNECT_PROJECT,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
         self.assertEqual(log_metadata['paired-data']['source_name'], source.name)
         self.assertEqual(log_metadata['paired-data']['source_uid'], source.uid)
@@ -760,14 +758,13 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url=reverse(
                 'api_v2:paired-data-detail',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
-                    'paired_data_uid': paired_data.paired_data_uid,
+                    'uid_asset': self.asset.uid,
+                    'uid_paired_data': paired_data.paired_data_uid,
                 },
             ),
-            expected_action=AuditAction.DISCONNECT_PROJECT,
             request_data=None,
+            expected_action=AuditAction.DISCONNECT_PROJECT,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
         self.assertEqual(log_metadata['paired-data']['source_name'], source.name)
         self.assertEqual(log_metadata['paired-data']['source_uid'], source.uid)
@@ -794,14 +791,13 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url=reverse(
                 'api_v2:paired-data-detail',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
-                    'paired_data_uid': paired_data.paired_data_uid,
+                    'uid_asset': self.asset.uid,
+                    'uid_paired_data': paired_data.paired_data_uid,
                 },
             ),
-            expected_action=AuditAction.MODIFY_IMPORTED_FIELDS,
             request_data={'fields': ['q2']},
+            expected_action=AuditAction.MODIFY_IMPORTED_FIELDS,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
         self.assertEqual(log_metadata['paired-data']['source_name'], source.name)
         self.assertEqual(log_metadata['paired-data']['source_uid'], source.uid)
@@ -830,7 +826,6 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             request_data=request_data,
             expected_action=AuditAction.ADD_MEDIA,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
         file = AssetFile.objects.filter(asset=self.asset).first()
         self.assertEqual(log_metadata['asset-file']['uid'], file.uid)
@@ -853,14 +848,13 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url=reverse(
                 f'{url_prefix}asset-file-detail',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
-                    'uid': media.uid,
+                    'uid_asset': self.asset.uid,
+                    'uid_file': media.uid,
                 },
             ),
-            expected_action=AuditAction.DELETE_MEDIA,
             request_data=None,
+            expected_action=AuditAction.DELETE_MEDIA,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
         self.assertEqual(log_metadata['asset-file']['uid'], media.uid)
         self.assertEqual(log_metadata['asset-file']['filename'], media.filename)
@@ -883,7 +877,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
     def test_create_from_import_task(self, file_or_url, change_name, use_v2):
         task_data = {
             'destination': reverse(
-                'api_v2:asset-detail', kwargs={'uid': self.asset.uid}
+                'api_v2:asset-detail', kwargs={'uid_asset': self.asset.uid}
             ),
             'name': 'name',
         }
@@ -933,9 +927,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         form_replace_log = log_query.filter(action=AuditAction.REPLACE_FORM).first()
         self.assertEqual(form_replace_log.object_id, self.asset.id)
         self._check_common_metadata(
-            form_replace_log.metadata,
-            PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
+            form_replace_log.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE
         )
         self.assertEqual(
             form_replace_log.metadata['latest_version_uid'],
@@ -983,13 +975,12 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url=reverse(
                 'api_v2:asset-export-list',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
+                    'uid_asset': self.asset.uid,
                 },
             ),
-            expected_action=AuditAction.EXPORT,
             request_data=request_data,
+            expected_action=AuditAction.EXPORT,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
 
     def test_export_v1_creates_log(self):
@@ -1004,7 +995,9 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             'type': 'xls',
             'xls_types_as_text': False,
             'include_media_url': True,
-            'source': reverse('api_v2:asset-detail', kwargs={'uid': self.asset.uid}),
+            'source': reverse(
+                'api_v2:asset-detail', kwargs={'uid_asset': self.asset.uid}
+            ),
         }
         # can't use _base_project_history_log_test because
         # the old endpoint doesn't like format=json
@@ -1018,9 +1011,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         )
         self.assertEqual(log_query.count(), 1)
         log = log_query.first()
-        self._check_common_metadata(
-            log.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log.object_id, self.asset.id)
 
     @data(
@@ -1087,9 +1078,9 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         ]
         self.client.post(
             path=reverse(
-                'api_v2:asset-permission-assignment-bulk-assignments',
+                'api_v2:asset-permission-assignment-bulk-actions',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
+                    'uid_asset': self.asset.uid,
                 },
             ),
             data=request_data,
@@ -1103,14 +1094,10 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             metadata__permissions__username='anotheruser'
         ).first()
         self._check_common_metadata(
-            someuser_log.metadata,
-            PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE,
-            expect_owner=True,
+            someuser_log.metadata, PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE
         )
         self._check_common_metadata(
-            anotheruser_log.metadata,
-            PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE,
-            expect_owner=True,
+            anotheruser_log.metadata, PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE
         )
         self.assertListEqual(
             someuser_log.metadata['permissions'][
@@ -1193,12 +1180,12 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         # /bulk expects assignments to come in a list
         if use_bulk:
             request_data = [request_data]
-        endpoint = 'bulk-assignments' if use_bulk else 'list'
+        endpoint = 'bulk-actions' if use_bulk else 'list'
         self.client.post(
             path=reverse(
                 f'api_v2:asset-permission-assignment-{endpoint}',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
+                    'uid_asset': self.asset.uid,
                 },
             ),
             data=request_data,
@@ -1207,9 +1194,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log = ProjectHistoryLog.objects.filter(action=expected_action).first()
         self.assertEqual(log.action, expected_action)
         self._check_common_metadata(
-            log.metadata,
-            PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE,
-            expect_owner=True,
+            log.metadata, PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE
         )
 
         # get the permission that was created
@@ -1220,16 +1205,17 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         self.client.delete(
             path=reverse(
                 'api_v2:asset-permission-assignment-detail',
-                kwargs={'parent_lookup_asset': self.asset.uid, 'uid': perm.uid},
+                kwargs={
+                    'uid_asset': self.asset.uid,
+                    'uid_permission_assignment': perm.uid,
+                },
             ),
         )
         removal_log = ProjectHistoryLog.objects.filter(
             action=expected_inverse_action
         ).first()
         self._check_common_metadata(
-            removal_log.metadata,
-            PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE,
-            expect_owner=True,
+            removal_log.metadata, PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE
         )
 
     # use bulk endpoint? (as opposed to -detail)
@@ -1245,12 +1231,12 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         }
         if use_bulk:
             request_data = [request_data]
-        endpoint = 'bulk-assignments' if use_bulk else 'list'
+        endpoint = 'bulk-actions' if use_bulk else 'list'
         self.client.post(
             path=reverse(
                 f'api_v2:asset-permission-assignment-{endpoint}',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
+                    'uid_asset': self.asset.uid,
                 },
             ),
             data=request_data,
@@ -1261,9 +1247,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             action=AuditAction.MODIFY_USER_PERMISSIONS
         ).first()
         self._check_common_metadata(
-            log.metadata,
-            PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE,
-            expect_owner=True,
+            log.metadata, PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE
         )
         self.assertListEqual(
             sorted(
@@ -1284,8 +1268,8 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             path=reverse(
                 'api_v2:asset-permission-assignment-detail',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
-                    'uid': view_asset_perm.uid,
+                    'uid_asset': self.asset.uid,
+                    'uid_permission_assignment': view_asset_perm.uid,
                 },
             ),
         )
@@ -1333,12 +1317,12 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         }
         if use_bulk:
             request_data = [request_data]
-        endpoint = 'bulk-assignments' if use_bulk else 'list'
+        endpoint = 'bulk-actions' if use_bulk else 'list'
         self.client.post(
             path=reverse(
                 f'api_v2:asset-permission-assignment-{endpoint}',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
+                    'uid_asset': self.asset.uid,
                 },
             ),
             data=request_data,
@@ -1349,9 +1333,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             action=AuditAction.MODIFY_USER_PERMISSIONS
         ).first()
         self._check_common_metadata(
-            log.metadata,
-            PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE,
-            expect_owner=True,
+            log.metadata, PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE
         )
         # can't sort a list of strings and dicts,
         # so check length and expected entries individually
@@ -1399,8 +1381,8 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             path=reverse(
                 'api_v2:asset-permission-assignment-detail',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
-                    'uid': partial_submissions_perm.uid,
+                    'uid_asset': self.asset.uid,
+                    'uid_permission_assignment': partial_submissions_perm.uid,
                 },
             ),
         )
@@ -1436,7 +1418,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             path=reverse(
                 'api_v2:asset-permission-assignment-list',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
+                    'uid_asset': self.asset.uid,
                 },
             ),
             data={
@@ -1475,9 +1457,9 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         ]
         self.client.post(
             path=reverse(
-                'api_v2:asset-permission-assignment-bulk-assignments',
+                'api_v2:asset-permission-assignment-bulk-actions',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
+                    'uid_asset': self.asset.uid,
                 },
             ),
             data=data,
@@ -1491,12 +1473,11 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             method=self.client.patch,
             url=reverse(
                 'api_v2:asset-permission-assignment-clone',
-                kwargs={'parent_lookup_asset': self.asset.uid},
+                kwargs={'uid_asset': self.asset.uid},
             ),
             request_data={CLONE_ARG_NAME: second_asset.uid},
             expected_action=AuditAction.CLONE_PERMISSIONS,
             expected_subtype=PROJECT_HISTORY_LOG_PERMISSION_SUBTYPE,
-            expect_owner=True,
         )
         self.assertEqual(log_metadata['cloned_from'], second_asset.uid)
 
@@ -1563,7 +1544,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         submission_url = reverse(
             self._get_endpoint('submission-duplicate'),
             kwargs={
-                'parent_lookup_asset': self.asset.uid,
+                'uid_asset': self.asset.uid,
                 'pk': submission['_id'],
             },
         )
@@ -1578,7 +1559,6 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             request_data={},
             expected_action=AuditAction.ADD_SUBMISSION,
             expected_subtype=PROJECT_HISTORY_LOG_PROJECT_SUBTYPE,
-            expect_owner=True,
         )
         new_submission = Instance.objects.last()
         self._check_submission_log_metadata(
@@ -1614,7 +1594,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         edit_submission_xml(xml_parsed, 'Q1', 'new answer')
         edited_submission = xml_tostring(xml_parsed)
         url = reverse(
-            self._get_endpoint('api_v2:assetsnapshot-submission-alias'),
+            self._get_endpoint('api_v2:assetsnapshot-submission-openrosa'),
             args=(self.asset.snapshot().uid,),
         )
         data = {
@@ -1636,9 +1616,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         # check the log has the expected fields and metadata
         self.assertEqual(log.object_id, self.asset.id)
         self.assertEqual(log.action, AuditAction.MODIFY_SUBMISSION)
-        self._check_common_metadata(
-            log.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         submitted_by = username if username is not None else 'AnonymousUser'
         self._check_submission_log_metadata(
             log.metadata, submitted_by, instance.root_uuid
@@ -1658,7 +1636,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
 
         self.client.patch(
             path=reverse(
-                'api_v2:submission-bulk', kwargs={'parent_lookup_asset': self.asset.uid}
+                'api_v2:submission-bulk', kwargs={'uid_asset': self.asset.uid}
             ),
             data={'payload': payload},
             format='json',
@@ -1668,9 +1646,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log1 = ProjectHistoryLog.objects.filter(
             metadata__submission__submitted_by='adminuser'
         ).first()
-        self._check_common_metadata(
-            log1.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log1.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log1.action, AuditAction.MODIFY_SUBMISSION)
         self._check_submission_log_metadata(
             log1.metadata, 'adminuser', instance1.root_uuid
@@ -1679,9 +1655,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log2 = ProjectHistoryLog.objects.filter(
             metadata__submission__submitted_by='someuser'
         ).first()
-        self._check_common_metadata(
-            log2.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log2.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log2.action, AuditAction.MODIFY_SUBMISSION)
         self._check_submission_log_metadata(
             log2.metadata, 'someuser', instance2.root_uuid
@@ -1690,9 +1664,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log3 = ProjectHistoryLog.objects.filter(
             metadata__submission__submitted_by='AnonymousUser'
         ).first()
-        self._check_common_metadata(
-            log3.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log3.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log3.action, AuditAction.MODIFY_SUBMISSION)
         self._check_submission_log_metadata(
             log3.metadata, 'AnonymousUser', instance3.root_uuid
@@ -1706,7 +1678,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url=reverse(
                 'api_v2:submission-validation-status',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
+                    'uid_asset': self.asset.uid,
                     'pk': submission['_id'],
                 },
             ),
@@ -1735,7 +1707,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         self.client.patch(
             path=reverse(
                 'api_v2:submission-validation-statuses',
-                kwargs={'parent_lookup_asset': self.asset.uid},
+                kwargs={'uid_asset': self.asset.uid},
             ),
             data={'payload': payload},
             format='json',
@@ -1745,9 +1717,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log1 = ProjectHistoryLog.objects.filter(
             metadata__submission__submitted_by='adminuser'
         ).first()
-        self._check_common_metadata(
-            log1.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log1.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log1.action, AuditAction.MODIFY_SUBMISSION)
         self.assertEqual(log1.metadata['submission']['status'], 'On Hold')
         self._check_submission_log_metadata(
@@ -1757,9 +1727,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log2 = ProjectHistoryLog.objects.filter(
             metadata__submission__submitted_by='someuser'
         ).first()
-        self._check_common_metadata(
-            log2.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log2.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log2.action, AuditAction.MODIFY_SUBMISSION)
         self.assertEqual(log2.metadata['submission']['status'], 'On Hold')
         self._check_submission_log_metadata(
@@ -1769,9 +1737,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log3 = ProjectHistoryLog.objects.filter(
             metadata__submission__submitted_by='AnonymousUser'
         ).first()
-        self._check_common_metadata(
-            log3.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log3.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log3.action, AuditAction.MODIFY_SUBMISSION)
         self.assertEqual(log3.metadata['submission']['status'], 'On Hold')
         self._check_submission_log_metadata(
@@ -1779,13 +1745,14 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         )
 
     @data(
-        # submit as anonymous?, use v1 endpoint?
-        (True, False),
-        (False, True),
-        (False, False),
+        # user_type, use v1 endpoint?
+        ('anon', False),
+        ('user', True),
+        ('user', False),
+        ('dc', False),
     )
     @unpack
-    def test_add_submission(self, anonymous, v1):
+    def test_add_submission(self, user_type, v1):
         # prepare submission data
         uuid_ = uuid.uuid4()
         self.asset.deploy(backend='mock')
@@ -1805,7 +1772,14 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             'version': self.asset.latest_version.uid,
         }
         endpoint = 'submissions-list' if v1 else 'submissions'
-        kwargs = {'username': self.user.username} if not v1 else {}
+        data_collector = None
+        if user_type == 'dc':
+            dcg = DataCollectorGroup.objects.create(name='DCG', owner=self.asset.owner)
+            data_collector = DataCollector.objects.create(name='DC', group=dcg)
+            dcg.assets.add(self.asset)
+            kwargs = {'token': data_collector.token}
+        else:
+            kwargs = {'username': self.user.username} if not v1 else {}
         url = reverse(
             self._get_endpoint(endpoint),
             kwargs=kwargs,
@@ -1814,7 +1788,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         # ensure anonymous users are allowed to submit
         self.asset.assign_perm(perm=PERM_ADD_SUBMISSIONS, user_obj=AnonymousUser())
 
-        if not anonymous:
+        if user_type == 'user':
             # the submission endpoints don't allow session authentication, so
             # just force the request to attach the correct user
             self.client.force_authenticate(user=self.user)
@@ -1833,11 +1807,13 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
 
         self.assertEqual(log.object_id, self.asset.id)
         self.assertEqual(log.action, AuditAction.ADD_SUBMISSION)
-        self._check_common_metadata(
-            log.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
+        self._check_common_metadata(log.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
+        username = (
+            'AnonymousUser' if user_type in ['anon', 'dc'] else self.user.username
         )
-        username = 'AnonymousUser' if anonymous else self.user.username
-        self._check_submission_log_metadata(log.metadata, username, inst.root_uuid)
+        self._check_submission_log_metadata(
+            log.metadata, username, inst.root_uuid, data_collector=data_collector
+        )
 
     def test_delete_single_submission(self):
         instance, submission = self._add_submission('adminuser')
@@ -1846,7 +1822,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
             url=reverse(
                 'api_v2:submission-detail',
                 kwargs={
-                    'parent_lookup_asset': self.asset.uid,
+                    'uid_asset': self.asset.uid,
                     'pk': submission['_id'],
                 },
             ),
@@ -1883,7 +1859,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         self.client.delete(
             path=reverse(
                 'api_v2:submission-bulk',
-                kwargs={'parent_lookup_asset': self.asset.uid},
+                kwargs={'uid_asset': self.asset.uid},
             ),
             data={'payload': payload},
             format='json',
@@ -1895,9 +1871,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log1 = ProjectHistoryLog.objects.filter(
             metadata__submission__submitted_by='adminuser'
         ).first()
-        self._check_common_metadata(
-            log1.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log1.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log1.action, AuditAction.DELETE_SUBMISSION)
         self._check_submission_log_metadata(
             log1.metadata, 'adminuser', instance1.root_uuid
@@ -1906,9 +1880,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log2 = ProjectHistoryLog.objects.filter(
             metadata__submission__submitted_by='someuser'
         ).first()
-        self._check_common_metadata(
-            log2.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log2.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log2.action, AuditAction.DELETE_SUBMISSION)
         self._check_submission_log_metadata(
             log2.metadata, 'someuser', instance2.root_uuid
@@ -1917,9 +1889,7 @@ class TestProjectHistoryLogs(BaseAuditLogTestCase):
         log3 = ProjectHistoryLog.objects.filter(
             metadata__submission__submitted_by='AnonymousUser'
         ).first()
-        self._check_common_metadata(
-            log3.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE, expect_owner=True
-        )
+        self._check_common_metadata(log3.metadata, PROJECT_HISTORY_LOG_PROJECT_SUBTYPE)
         self.assertEqual(log3.action, AuditAction.DELETE_SUBMISSION)
         self._check_submission_log_metadata(
             log3.metadata, 'AnonymousUser', instance3.root_uuid

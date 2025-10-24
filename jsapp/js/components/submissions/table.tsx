@@ -90,7 +90,9 @@ import envStore from '#/envStore'
 import pageState from '#/pageState.store'
 import type { PageStateStoreState } from '#/pageState.store'
 import { stores } from '#/stores'
-import { formatTimeDateShort } from '#/utils'
+import { formatTimeDateShort, recordKeys } from '#/utils'
+import ActionIcon from '../common/ActionIcon'
+import LimitNotifications from '../usageLimits/limitNotifications.component'
 import RepeatGroupCell from './RepeatGroupCell'
 import AudioCell from './audioCell'
 import MediaCell from './mediaCell'
@@ -493,7 +495,7 @@ export class DataTable extends React.Component<DataTableProps, DataTableState> {
             return (
               <TableBulkCheckbox
                 visibleRowsCount={maxPageRes}
-                selectedRowsCount={Object.keys(this.state.selectedRows).length}
+                selectedRowsCount={recordKeys(this.state.selectedRows).length}
                 totalRowsCount={this.state.resultsTotal}
                 onSelectAllPages={this.bulkSelectAll.bind(this)}
                 onSelectCurrentPage={this.bulkSelectAllRows.bind(this, true)}
@@ -529,24 +531,22 @@ export class DataTable extends React.Component<DataTableProps, DataTableState> {
             causing an unnecessary space under the last table row to happen.
             Let's try to fix this one day by introducing better tooltips.
             */}
-            <Button
-              type='text'
-              size='s'
-              startIcon='view'
-              tooltip={t('Open')}
-              tooltipPosition='left'
+            <ActionIcon
+              variant='transparent'
+              tooltip={t('View')}
+              iconName='view'
+              size='sm'
               onClick={() => {
                 this.launchSubmissionModal(row.original._id)
               }}
             />
 
             {userCanSeeEditIcon && userHasPermForSubmission('change_submissions', this.props.asset, row.original) && (
-              <Button
-                type='text'
-                size='s'
-                startIcon='edit'
+              <ActionIcon
+                variant='transparent'
                 tooltip={t('Edit')}
-                tooltipPosition='left'
+                iconName='edit'
+                size='sm'
                 onClick={() => {
                   this.launchEditSubmission(row.original._id)
                 }}
@@ -843,14 +843,12 @@ export class DataTable extends React.Component<DataTableProps, DataTableState> {
           }
 
           if (q && q.type && row.value) {
-            if (Object.keys(TABLE_MEDIA_TYPES).includes(q.type)) {
+            if (recordKeys(TABLE_MEDIA_TYPES).includes(q.type)) {
               let mediaAttachment = null
 
               const attachmentIndex: number = row.original._attachments.findIndex(
                 (attachment: SubmissionAttachment) => {
-                  const attachmentFileNameEnd = attachment.filename.split('/').pop()
-                  const normalizedRowValue = row.value.replace(/ /g, '_')
-                  return attachmentFileNameEnd === normalizedRowValue
+                  return attachment.media_file_basename === row.value
                 },
               )
 
@@ -1250,7 +1248,7 @@ export class DataTable extends React.Component<DataTableProps, DataTableState> {
 
     // If the entirety of the results has been selected, selectAll should be true
     // Useful when the # of results is smaller than the page size.
-    const scount = Object.keys(s).length
+    const scount = recordKeys(s).length
 
     if (scount === this.state.resultsTotal) {
       this.setState({
@@ -1386,6 +1384,9 @@ export class DataTable extends React.Component<DataTableProps, DataTableState> {
     }
     return (
       <bem.FormView m={formViewModifiers}>
+        <bem.FormView__item m='banner-container'>
+          <LimitNotifications />
+        </bem.FormView__item>
         <bem.FormView__group m={['table-header', this.state.loading ? 'table-loading' : 'table-loaded']}>
           {userCan(PERMISSIONS_CODENAMES.change_asset, this.props.asset) && (
             <ColumnsHideDropdown
@@ -1418,7 +1419,6 @@ export class DataTable extends React.Component<DataTableProps, DataTableState> {
             />
           </bem.FormView__item>
         </bem.FormView__group>
-
         <ReactTable
           data={this.state.submissions}
           columns={this.state.columns}

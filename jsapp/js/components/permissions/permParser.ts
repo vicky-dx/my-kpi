@@ -2,13 +2,9 @@ import clonedeep from 'lodash.clonedeep'
 import isEqual from 'lodash.isequal'
 import type { PartialPermission, PartialPermissionFilter, PermissionBase, PermissionResponse } from '#/dataInterface'
 import { ANON_USERNAME, buildUserUrl, getUsernameFromUrl } from '#/users/utils'
+import { recordEntries, recordKeys, recordValues } from '#/utils'
 import permConfig from './permConfig'
-import type {
-  CheckboxNameAll,
-  CheckboxNamePartialByResponses,
-  CheckboxNamePartialByUsers,
-  PermissionCodename,
-} from './permConstants'
+import type { CheckboxNameAll, PermissionCodename } from './permConstants'
 import { CHECKBOX_PERM_PAIRS, PARTIAL_BY_RESPONSES_PERM_PAIRS, PARTIAL_BY_USERS_PERM_PAIRS } from './permConstants'
 import {
   getCheckboxNameByPermission,
@@ -24,35 +20,39 @@ import {
 export interface PermsFormData {
   /** Who give permissions to */
   username: string
-  formView?: boolean
-  formEdit?: boolean
-  formManage?: boolean
-  submissionsAdd?: boolean
-  submissionsView?: boolean
-  submissionsViewPartialByUsers?: boolean
-  submissionsViewPartialByUsersList?: string[]
-  submissionsViewPartialByResponses?: boolean
-  submissionsViewPartialByResponsesQuestion?: string
-  submissionsViewPartialByResponsesValue?: string
-  submissionsEdit?: boolean
-  submissionsEditPartialByUsers?: boolean
-  submissionsEditPartialByUsersList?: string[]
-  submissionsEditPartialByResponses?: boolean
-  submissionsEditPartialByResponsesQuestion?: string
-  submissionsEditPartialByResponsesValue?: string
-  submissionsDelete?: boolean
-  submissionsDeletePartialByUsers?: boolean
-  submissionsDeletePartialByUsersList?: string[]
-  submissionsDeletePartialByResponses?: boolean
-  submissionsDeletePartialByResponsesQuestion?: string
-  submissionsDeletePartialByResponsesValue?: string
-  submissionsValidate?: boolean
-  submissionsValidatePartialByUsers?: boolean
-  submissionsValidatePartialByUsersList?: string[]
-  submissionsValidatePartialByResponses?: boolean
-  submissionsValidatePartialByResponsesQuestion?: string
-  submissionsValidatePartialByResponsesValue?: string
+  formView: boolean
+  formEdit: boolean
+  formManage: boolean
+  submissionsAdd: boolean
+  submissionsView: boolean
+  submissionsViewPartialByUsers: boolean
+  submissionsViewPartialByUsersList: string[]
+  submissionsViewPartialByResponses: boolean
+  submissionsViewPartialByResponsesQuestion: string | null
+  submissionsViewPartialByResponsesValue: string
+  submissionsEdit: boolean
+  submissionsEditPartialByUsers: boolean
+  submissionsEditPartialByUsersList: string[]
+  submissionsEditPartialByResponses: boolean
+  submissionsEditPartialByResponsesQuestion: string | null
+  submissionsEditPartialByResponsesValue: string
+  submissionsDelete: boolean
+  submissionsDeletePartialByUsers: boolean
+  submissionsDeletePartialByUsersList: string[]
+  submissionsDeletePartialByResponses: boolean
+  submissionsDeletePartialByResponsesQuestion: string | null
+  submissionsDeletePartialByResponsesValue: string
+  submissionsValidate: boolean
+  submissionsValidatePartialByUsers: boolean
+  submissionsValidatePartialByUsersList: string[]
+  submissionsValidatePartialByResponses: boolean
+  submissionsValidatePartialByResponsesQuestion: string | null
+  submissionsValidatePartialByResponsesValue: string
 }
+
+// This is `PermsFormData` with everything partial except username, because for most of the code only the username is
+// required to be present.
+export type PermsFormDataPartialWithUsername = Partial<PermsFormData> & { username: string }
 
 export interface UserWithPerms {
   user: {
@@ -199,6 +199,7 @@ export function removeImpliedPerms(parsed: PermissionBase[]): PermissionBase[] {
   // Step 2. We remove implied from the outcome list
   const output = parsed.filter((backendPerm) => !impliedPerms.has(backendPerm.permission))
 
+  // Note: the UI doesn't handle implied partial permissions in a non-confusing way.
   // Step 3. Remove implied permissions for each `partial_submissions` left
   output.forEach((backendPerm) => {
     const permDef = permConfig.getPermission(backendPerm.permission)
@@ -214,7 +215,7 @@ export function removeImpliedPerms(parsed: PermissionBase[]): PermissionBase[] {
  * Builds (from form data) an object that Back-end endpoints can understand.
  * Removes contradictory and implied permissions from final output.
  */
-export function parseFormData(data: PermsFormData): PermissionBase[] {
+export function parseFormData(data: PermsFormDataPartialWithUsername): PermissionBase[] {
   let parsed = []
 
   // We need to gather all partial permissions first, because they end up as
@@ -223,10 +224,9 @@ export function parseFormData(data: PermsFormData): PermissionBase[] {
   const partialPerms: PartialPermission[] = []
 
   // Step 1: Gather all partial "by users" permissions
-  for (const [checkboxName, permCodename] of Object.entries(PARTIAL_BY_USERS_PERM_PAIRS)) {
-    const byUsersCheckboxName = checkboxName as CheckboxNamePartialByUsers
-    if (data[byUsersCheckboxName]) {
-      const listName = getPartialByUsersListName(byUsersCheckboxName)
+  for (const [checkboxName, permCodename] of recordEntries(PARTIAL_BY_USERS_PERM_PAIRS)) {
+    if (data[checkboxName]) {
+      const listName = getPartialByUsersListName(checkboxName)
       const partialUsers = data[listName] || []
 
       // For one user it will be string, for multiple it will be an `$in` object
@@ -240,12 +240,11 @@ export function parseFormData(data: PermsFormData): PermissionBase[] {
   }
 
   // Step 2: Gather all partial "by responses" permissions
-  for (const [checkboxName, permCodename] of Object.entries(PARTIAL_BY_RESPONSES_PERM_PAIRS)) {
-    const byResponsesCheckboxName = checkboxName as CheckboxNamePartialByResponses
-    if (data[byResponsesCheckboxName]) {
-      const questionProp = getPartialByResponsesQuestionName(byResponsesCheckboxName)
+  for (const [checkboxName, permCodename] of recordEntries(PARTIAL_BY_RESPONSES_PERM_PAIRS)) {
+    if (data[checkboxName]) {
+      const questionProp = getPartialByResponsesQuestionName(checkboxName)
       const question = data[questionProp]
-      const valueProp = getPartialByResponsesValueName(byResponsesCheckboxName)
+      const valueProp = getPartialByResponsesValueName(checkboxName)
       const value = data[valueProp] // this can be empty string (and it's ok)
 
       if (question) {
@@ -282,7 +281,7 @@ export function parseFormData(data: PermsFormData): PermissionBase[] {
   }
 
   // Step 4: Gather all non-partial permissions
-  for (const [checkboxNameString, permCodename] of Object.entries(CHECKBOX_PERM_PAIRS)) {
+  for (const [checkboxNameString, permCodename] of recordEntries(CHECKBOX_PERM_PAIRS)) {
     const checkboxName = checkboxNameString as CheckboxNameAll
     if (
       data[checkboxName] &&
@@ -308,8 +307,8 @@ export function parseFormData(data: PermsFormData): PermissionBase[] {
  * functions are ensuring that (see `applyValidityRules` function from
  * `userAssetPermsEditor.utils.ts` file).
  */
-export function buildFormData(permissions: PermissionResponse[], username?: string): PermsFormData {
-  const formData: PermsFormData = {
+export function buildFormData(permissions: PermissionResponse[], username?: string) {
+  const formData: PermsFormDataPartialWithUsername = {
     username: username || '',
   }
 
@@ -343,10 +342,9 @@ export function buildFormData(permissions: PermissionResponse[], username?: stri
           return
         }
 
-        // Step 3.  We assume here that there might be a case of 1 or 2 filters
-        // tops. There might be one "by users" or one "by responses" or one each
-        // - no other possiblities can happen. We get each of them separately
-        // and try to put them back as form data:
+        // Step 3. Find all usernames from "by users" permission and a single
+        // response filter (we assume there can be only single condition) for
+        // "by responses" permission.
         const byUsersFilterList = getPartialByUsersFilterList(partial)
         const byResponsesFilter = getPartialByResponsesFilter(partial)
 
@@ -377,8 +375,8 @@ export function buildFormData(permissions: PermissionResponse[], username?: stri
             // Step 5A. Set question name
             // Note that there is always one key with one value in this object,
             // so that we can go with `[0]` without risk
-            formData[byResponsesQuestionName] = Object.keys(byResponsesFilter)[0]
-            const value = Object.values(byResponsesFilter)[0]
+            formData[byResponsesQuestionName] = recordKeys(byResponsesFilter)[0]
+            const value = recordValues(byResponsesFilter)[0]
             if (typeof value === 'string') {
               // Step 5B. Set value
               formData[byResponsesValueName] = value
@@ -445,7 +443,7 @@ export function parseBackendData(
 ): UserWithPerms[] {
   const output: UserWithPerms[] = []
 
-  const groupedData: { [userName: string]: PermissionResponse[] } = {}
+  const groupedData: Record<string, PermissionResponse[]> = {}
   perms.forEach((perm) => {
     // anonymous user permissions are our inner way of handling public sharing
     if (getUsernameFromUrl(perm.user) === ANON_USERNAME && !includeAnon) {
@@ -457,7 +455,7 @@ export function parseBackendData(
     groupedData[perm.user].push(perm)
   })
 
-  Object.keys(groupedData).forEach((userUrl) => {
+  recordKeys(groupedData).forEach((userUrl) => {
     output.push({
       user: {
         url: userUrl,

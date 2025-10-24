@@ -24,6 +24,10 @@ from django_redis import get_redis_connection
 from pyxform.builder import create_survey_from_xls
 from rest_framework import exceptions, status
 
+from kobo.apps.data_collectors.utils import (
+    remove_data_collector_enketo_links,
+    set_data_collector_enketo_links,
+)
 from kobo.apps.openrosa.apps.logger.models import (
     Attachment,
     DailyXFormSubmissionCounter,
@@ -51,7 +55,6 @@ from kobo.apps.trackers.models import NLPUsageCounter
 from kpi.constants import (
     PERM_CHANGE_SUBMISSIONS,
     PERM_DELETE_SUBMISSIONS,
-    PERM_FROM_KC_ONLY,
     PERM_PARTIAL_SUBMISSIONS,
     PERM_VALIDATE_SUBMISSIONS,
     PERM_VIEW_SUBMISSIONS,
@@ -70,7 +73,6 @@ from kpi.exceptions import (
 from kpi.fields import KpiUidField
 from kpi.interfaces.sync_backend_media import SyncBackendMediaInterface
 from kpi.models.asset_file import AssetFile
-from kpi.models.object_permission import ObjectPermission
 from kpi.models.paired_data import PairedData
 from kpi.utils.files import ExtendedContentFile
 from kpi.utils.log import logging
@@ -79,7 +81,8 @@ from kpi.utils.object_permission import get_database_user
 from kpi.utils.xml import fromstring_preserve_root_xmlns, xml_tostring
 from ..exceptions import AttachmentUidMismatchException, BadFormatException
 from .base_backend import BaseDeploymentBackend
-from .kc_access.utils import assign_applicable_kc_permissions, kc_transaction_atomic
+from .kc_access.utils import kc_transaction_atomic
+from .openrosa_utils import create_enketo_links
 
 
 class OpenRosaDeploymentBackend(BaseDeploymentBackend):
@@ -102,27 +105,6 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
             return self.xform.attachment_storage_bytes
         except (InvalidXFormException, MissingXFormException):
             return 0
-
-    def bulk_assign_mapped_perms(self):
-        """
-        Bulk assign all KoBoCAT permissions related to KPI permissions.
-        Useful to assign permissions retroactively upon deployment.
-        Beware: it only adds permissions, it does not remove or sync permissions.
-        """
-        users_with_perms = self.asset.get_users_with_perms(attach_perms=True)
-
-        # if only the owner has permissions, no need to go further
-        if (
-            len(users_with_perms) == 1
-            and list(users_with_perms)[0].id == self.asset.owner_id
-        ):
-            return
-
-        with kc_transaction_atomic():
-            for user, perms in users_with_perms.items():
-                if user.id == self.asset.owner_id:
-                    continue
-                assign_applicable_kc_permissions(self.asset, user, perms)
 
     def calculated_submission_count(
         self, user: settings.AUTH_USER_MODEL, **kwargs
@@ -170,6 +152,7 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
                 'version': self.asset.version_id,
             }
         )
+        super().connect(active)
 
     @property
     def form_uuid(self):
@@ -246,6 +229,11 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
             )
             .values('pk', 'attachment_basename', 'attachment_uid')
         )
+
+        # Add asset info for project history logging
+        for att in attachments:
+            att['asset_id'] = self.asset.id
+            att['asset_uid'] = self.asset.uid
 
         count = len(attachment_uids)
         if count != len(attachments):
@@ -385,7 +373,6 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
         all_attachment_xpaths = self.asset.get_all_attachment_xpaths()
         return self._rewrite_json_attachment_urls(
             self.get_submission(submission_id=instance.pk, user=user),
-            request,
             all_attachment_xpaths,
         )
 
@@ -482,6 +469,7 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
             xml_file=xml_submission_file,
             media_files=attachments,
             request=request,
+            check_usage_limits=False,
         )
 
     @property
@@ -695,6 +683,12 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
         }
         return links
 
+    def set_data_collector_enketo_links(self, token):
+        set_data_collector_enketo_links(token, [self.xform.id_string])
+
+    def remove_data_collector_enketo_links(self, token):
+        remove_data_collector_enketo_links(token, [self.xform.id_string])
+
     def get_enketo_survey_links(self):
         if not self.get_data('backend_response'):
             return {}
@@ -707,12 +701,7 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
         }
 
         try:
-            response = requests.post(
-                f'{settings.ENKETO_URL}/{settings.ENKETO_SURVEY_ENDPOINT}',
-                # bare tuple implies basic auth
-                auth=(settings.ENKETO_API_KEY, ''),
-                data=data,
-            )
+            response = create_enketo_links(data)
             response.raise_for_status()
         except requests.exceptions.RequestException:
             # Don't 500 the entire asset view if Enketo is unreachable
@@ -791,7 +780,6 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
         user: settings.AUTH_USER_MODEL,
         format_type: str = SUBMISSION_FORMAT_TYPE_JSON,
         submission_ids: list = None,
-        request: Optional['rest_framework.request.Request'] = None,
         **mongo_query_params,
     ) -> Union[Generator[dict, None, None], list]:
         """
@@ -821,7 +809,7 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
         )
 
         if format_type == SUBMISSION_FORMAT_TYPE_JSON:
-            submissions = self.__get_submissions_in_json(request, **params)
+            submissions = self.__get_submissions_in_json(**params)
         elif format_type == SUBMISSION_FORMAT_TYPE_XML:
             submissions = self.__get_submissions_in_xml(**params)
         else:
@@ -851,6 +839,13 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
             'content_type': 'application/json',
             'status': status.HTTP_200_OK,
         }
+
+    @property
+    def is_encrypted(self) -> bool:
+        try:
+            return self.xform.encrypted
+        except (InvalidXFormException, MissingXFormException):
+            return False
 
     @property
     def mongo_userform_id(self):
@@ -931,39 +926,6 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
                 'version': self.asset.version_id,
             }
         )
-
-    def remove_from_kc_only_flag(
-        self, specific_user: Union[int, settings.AUTH_USER_MODEL] = None
-    ):
-        """
-        Removes `from_kc_only` flag for ALL USERS unless `specific_user` is
-        provided
-
-        Args:
-            specific_user (int, User): User object or pk
-        """
-        # This flag lets us know that permission assignments in KPI exist
-        # only because they were copied from KoBoCAT (by `sync_from_kobocat`).
-        # As soon as permissions are assigned through KPI, this flag must be
-        # removed
-        #
-        # This method is here instead of `ObjectPermissionMixin` because
-        # it's specific to KoBoCat as backend.
-
-        # TODO: Remove this method after kobotoolbox/kobocat#642
-
-        filters = {
-            'permission__codename': PERM_FROM_KC_ONLY,
-            'asset_id': self.asset.id,
-        }
-        if specific_user is not None:
-            try:
-                user_id = specific_user.pk
-            except AttributeError:
-                user_id = specific_user
-            filters['user_id'] = user_id
-
-        ObjectPermission.objects.filter(**filters).delete()
 
     def rename_enketo_id_key(
         self, previous_owner_username: str, project_identifier: str = None
@@ -1243,6 +1205,7 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
             media_files=media_files,
             uuid=submission_uuid,
             request=kwargs.get('request'),
+            check_usage_limits=False,
         )
 
     @property
@@ -1384,6 +1347,8 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
                 'require_auth',
                 'uuid',
                 'mongo_uuid',
+                'encrypted',
+                'last_submission_time',
             )
             .select_related('user')  # Avoid extra query to validate username below
             .first()
@@ -1488,7 +1453,10 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
         file_.delete(force=True)
 
     def _last_submission_time(self):
-        return self.xform.last_submission_time
+        try:
+            return self.xform.last_submission_time
+        except (InvalidXFormException, MissingXFormException):
+            return None
 
     def _save_openrosa_metadata(self, file_: SyncBackendMediaInterface):
         """
@@ -1530,9 +1498,7 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
         file_.synced_with_backend = True
         file_.save(update_fields=['synced_with_backend'])
 
-    def __get_submissions_in_json(
-        self, request: Optional['rest_framework.request.Request'] = None, **params
-    ) -> Generator[dict, None, None]:
+    def __get_submissions_in_json(self, **params) -> Generator[dict, None, None]:
         """
         Retrieve submissions directly from Mongo.
         Submissions can be filtered with `params`.
@@ -1562,7 +1528,6 @@ class OpenRosaDeploymentBackend(BaseDeploymentBackend):
         return (
             self._inject_properties(
                 MongoHelper.to_readable_dict(submission),
-                request,
                 all_attachment_xpaths,
             )
             for submission in mongo_cursor

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import os
-from typing import Optional
 from uuid import uuid4
 
 from django.conf import settings
@@ -37,14 +36,13 @@ class MockDeploymentBackend(OpenRosaDeploymentBackend):
         user: settings.AUTH_USER_MODEL,
         format_type: str = SUBMISSION_FORMAT_TYPE_JSON,
         submission_ids: list = None,
-        request: Optional['rest_framework.request.Request'] = None,
         **mongo_query_params,
     ) -> list:
         # Overload parent to cast generator to a list. Many tests are expecting
         # a list
         return list(
             super().get_submissions(
-                user, format_type, submission_ids, request, **mongo_query_params
+                user, format_type, submission_ids, **mongo_query_params
             )
         )
 
@@ -71,7 +69,6 @@ class MockDeploymentBackend(OpenRosaDeploymentBackend):
            overriding the normal logic that populates this field with the current
            timestamp at the moment of submission.
         """
-
         class FakeRequest:
             pass
 
@@ -144,6 +141,12 @@ class MockDeploymentBackend(OpenRosaDeploymentBackend):
 
             if assign_perm:
                 self.asset.remove_perm(request.user, PERM_ADD_SUBMISSIONS)
+
+    def remove_data_collector_enketo_links(self, token):
+        pass
+
+    def set_data_collector_enketo_links(self, token):
+        pass
 
     def set_namespace(self, namespace):
         self.store_data(

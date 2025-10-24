@@ -5,10 +5,16 @@ from django.db.models import FileField
 from django.db.models.fields.files import FieldFile
 from storages.backends.s3 import ClientError, S3Storage
 
+from kpi.utils.log import logging
+
 
 class ExtendedFieldFile(FieldFile):
 
-    def move(self, target_folder: str) -> bool:
+    def __init__(self, instance, field, name):
+        super().__init__(instance, field, name)
+        self._raw_filename = os.path.basename(name) if name else None
+
+    def move(self, target_folder: str, reraise_errors: bool = False) -> bool:
 
         old_path = self.name
         filename = os.path.basename(old_path)
@@ -17,12 +23,17 @@ class ExtendedFieldFile(FieldFile):
         if isinstance(self.storage, S3Storage):
             copy_source = {
                 'Bucket': self.storage.bucket.name,
-                'Key': self.name
+                'Key': self.name,
             }
             try:
                 self.storage.bucket.copy(copy_source, new_path)
                 self.storage.delete(old_path)
-            except ClientError:
+            except ClientError as e:
+                logging.error(
+                    f'Error copying {old_path} to {new_path}: {e}', exc_info=True
+                )
+                if reraise_errors:
+                    raise e
                 return False
 
             self.name = new_path
@@ -38,8 +49,10 @@ class ExtendedFieldFile(FieldFile):
                 self.save(filename, f, save=False)
             self.storage.delete(old_path)
             success = True
-        except FileNotFoundError:
-            pass
+        except FileNotFoundError as fe:
+            logging.error(fe, exc_info=True)
+            if reraise_errors:
+                raise fe
         finally:
             # Restore `upload_to`
             self.field.upload_to = upload_to

@@ -3,13 +3,17 @@ import re
 
 from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext as t
+from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import mixins, permissions, status
+from rest_framework.decorators import action
 from rest_framework.exceptions import NotAuthenticated
+from rest_framework.parsers import FormParser, JSONParser
 from rest_framework.renderers import BrowsableAPIRenderer, JSONRenderer
 from rest_framework.response import Response
 
 from kobo.apps.audit_log.base_views import AuditLoggedViewSet
 from kobo.apps.audit_log.models import AuditType
+from kobo.apps.data_collectors.authentication import DataCollectorTokenAuthentication
 from kobo.apps.kobo_auth.shortcuts import User
 from kobo.apps.openrosa.apps.logger.models import Instance
 from kobo.apps.openrosa.libs import filters
@@ -22,13 +26,20 @@ from kobo.apps.openrosa.libs.utils.logger_tools import (
     safe_create_instance,
 )
 from kobo.apps.openrosa.libs.utils.string import dict_lists2strings
+from kobo.apps.openrosa.schema_extensions.v2.submission.serializers import (
+    OpenRosaPayload,
+    OpenRosaResponse,
+)
 from kpi.authentication import (
     BasicAuthentication,
     DigestAuthentication,
     SessionAuthentication,
     TokenAuthentication,
 )
+from kpi.parsers import RawFilenameMultiPartParser
 from kpi.utils.object_permission import get_database_user
+from kpi.utils.schema_extensions.markdown import read_md
+from kpi.utils.schema_extensions.response import open_api_200_ok_response
 from ..utils.rest_framework.viewsets import OpenRosaGenericViewSet
 from ..utils.xml import extract_confirmation_message
 
@@ -64,6 +75,44 @@ def create_instance_from_json(username, request):
     return safe_create_instance(username, xml_file, [], None, request=request)
 
 
+@extend_schema_view(
+    create_authenticated=extend_schema(
+        description=read_md('openrosa', 'submission/authenticated.md'),
+        request={'multipart/form-data': OpenRosaPayload},
+        responses=open_api_200_ok_response(
+            OpenRosaResponse,
+            media_type='application/xml',
+            error_media_type='application/xml',
+            raise_access_forbidden=False,
+        ),
+        tags=['OpenRosa Form Submission'],
+        operation_id='submission_authenticated',
+    ),
+    create_anonymous=extend_schema(
+        description=read_md('openrosa', 'submission/anonymous.md'),
+        request={'multipart/form-data': OpenRosaPayload},
+        responses=open_api_200_ok_response(
+            OpenRosaResponse,
+            media_type='application/xml',
+            error_media_type='application/xml',
+            raise_access_forbidden=False,
+        ),
+        tags=['OpenRosa Form Submission'],
+        operation_id='submission_anonymous',
+    ),
+    create_data_collector=extend_schema(
+        description=read_md('openrosa', 'submission/data_collector.md'),
+        request={'multipart/form-data': OpenRosaPayload},
+        responses=open_api_200_ok_response(
+            OpenRosaResponse,
+            media_type='application/xml',
+            error_media_type='application/xml',
+            raise_access_forbidden=False,
+        ),
+        tags=['OpenRosa Form Submission'],
+        operation_id='submission_data_collector',
+    ),
+)
 class XFormSubmissionApi(
     OpenRosaHeadersMixin,
     mixins.CreateModelMixin,
@@ -71,6 +120,17 @@ class XFormSubmissionApi(
     AuditLoggedViewSet,
 ):
     """
+    ViewSet for managing the enketo submission
+
+    Available actions:
+    - create        → POST /submission
+    - create        → POST /{username}/submission
+    - create        → POST /collector/{token}/submission
+
+
+    Documentation:
+    - docs/api/v2/submission/create.md
+
     Implements OpenRosa Api [FormSubmissionAPI](\
         https://bitbucket.org/javarosa/javarosa/wiki/FormSubmissionAPI)
 
@@ -123,12 +183,15 @@ class XFormSubmissionApi(
     filter_backends = (filters.AnonDjangoObjectPermissionFilter,)
     model = Instance
     permission_classes = (permissions.AllowAny,)
-    renderer_classes = (TemplateXMLRenderer,
-                        JSONRenderer,
-                        BrowsableAPIRenderer)
+    renderer_classes = (TemplateXMLRenderer, JSONRenderer, BrowsableAPIRenderer)
     serializer_class = SubmissionSerializer
     template_name = 'submission.xml'
     log_type = AuditType.PROJECT_HISTORY
+    parser_classes = (
+        JSONParser,
+        FormParser,
+        RawFilenameMultiPartParser,
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -142,7 +205,10 @@ class XFormSubmissionApi(
         authentication_classes = [
             DigestAuthentication,
             BasicAuthentication,
-            TokenAuthentication
+            TokenAuthentication,
+            # we only need this for the create_data_collector, but since we're setting
+            # this in the __init__ we can't set it in the action decorator
+            DataCollectorTokenAuthentication,
         ]
         # Do not use `SessionAuthentication`, which implicitly requires CSRF
         # prevention (which in turn requires that the CSRF token be submitted
@@ -154,10 +220,24 @@ class XFormSubmissionApi(
             and not issubclass(auth_class, SessionAuthentication)
         ]
 
+    @action(detail=False, methods=['POST'])
+    def create_authenticated(self, request, *args, **kwargs):
+        return self.create(request, *args, **kwargs)
+
+    @action(detail=False, methods=['POST'])
+    def create_anonymous(self, request, *args, **kwargs):
+        return self.create(request, *args, **kwargs)
+
+    @action(detail=False, methods=['POST'])
+    def create_data_collector(self, request, *args, **kwargs):
+        return self.create(request, *args, **kwargs)
+
     def create(self, request, *args, **kwargs):
         username = self.kwargs.get('username')
-
-        if self.request.user.is_anonymous:
+        token = self.kwargs.get('token')
+        if token:
+            username = None
+        elif self.request.user.is_anonymous:
             if not username:
                 # Authentication is mandatory when username is omitted from the
                 # submission URL

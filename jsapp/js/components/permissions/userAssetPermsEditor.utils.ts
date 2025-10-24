@@ -1,4 +1,5 @@
 import clonedeep from 'lodash.clonedeep'
+import { recordEntries } from '#/utils'
 import permConfig from './permConfig'
 import {
   CHECKBOX_DISABLED_SUFFIX,
@@ -14,10 +15,65 @@ import type {
   CheckboxNamePartialByUsers,
   PermissionCodename,
 } from './permConstants'
-import type { PermsFormData } from './permParser'
+import type { PermsFormDataPartialWithUsername } from './permParser'
 import type { AssignablePermsMap } from './sharingForm.component'
 import type { UserAssetPermsEditorState } from './userAssetPermsEditor.component'
 import { getPartialByResponsesQuestionName, getPartialByResponsesValueName, getPartialByUsersListName } from './utils'
+
+/**
+ * This is `UserAssetPermsEditorState` with all possible properties having falsy
+ * values.
+ */
+export const EMPTY_EDITOR_STATE: UserAssetPermsEditorState = {
+  isSubmitPending: false,
+  isEditingUsername: false,
+  isCheckingUsername: false,
+  username: '',
+  formView: false,
+  formViewDisabled: false,
+  formEdit: false,
+  formEditDisabled: false,
+  formManage: false,
+  formManageDisabled: false,
+  submissionsView: false,
+  submissionsViewDisabled: false,
+  submissionsViewPartialByUsers: false,
+  submissionsViewPartialByUsersDisabled: false,
+  submissionsViewPartialByUsersList: [],
+  submissionsViewPartialByResponses: false,
+  submissionsViewPartialByResponsesDisabled: false,
+  submissionsViewPartialByResponsesQuestion: null,
+  submissionsViewPartialByResponsesValue: '',
+  submissionsAdd: false,
+  submissionsAddDisabled: false,
+  submissionsEdit: false,
+  submissionsEditDisabled: false,
+  submissionsEditPartialByUsers: false,
+  submissionsEditPartialByUsersDisabled: false,
+  submissionsEditPartialByUsersList: [],
+  submissionsEditPartialByResponses: false,
+  submissionsEditPartialByResponsesDisabled: false,
+  submissionsEditPartialByResponsesQuestion: null,
+  submissionsEditPartialByResponsesValue: '',
+  submissionsValidate: false,
+  submissionsValidateDisabled: false,
+  submissionsValidatePartialByUsers: false,
+  submissionsValidatePartialByUsersDisabled: false,
+  submissionsValidatePartialByUsersList: [],
+  submissionsValidatePartialByResponses: false,
+  submissionsValidatePartialByResponsesDisabled: false,
+  submissionsValidatePartialByResponsesQuestion: null,
+  submissionsValidatePartialByResponsesValue: '',
+  submissionsDelete: false,
+  submissionsDeleteDisabled: false,
+  submissionsDeletePartialByUsers: false,
+  submissionsDeletePartialByUsersDisabled: false,
+  submissionsDeletePartialByUsersList: [],
+  submissionsDeletePartialByResponses: false,
+  submissionsDeletePartialByResponsesDisabled: false,
+  submissionsDeletePartialByResponsesQuestion: null,
+  submissionsDeletePartialByResponsesValue: '',
+}
 
 /**
  * Returns a list of checkboxes that applies for given permission. Because
@@ -28,7 +84,7 @@ import { getPartialByResponsesQuestionName, getPartialByResponsesValueName, getP
 function getPermissionCheckboxPairs(permCodename: PermissionCodename) {
   const found: CheckboxNameAll[] = []
 
-  for (const [checkboxName, checkboxPermPair] of Object.entries(CHECKBOX_PERM_PAIRS)) {
+  for (const [checkboxName, checkboxPermPair] of recordEntries(CHECKBOX_PERM_PAIRS)) {
     if (checkboxPermPair === permCodename) {
       found.push(checkboxName as CheckboxNameAll)
     }
@@ -111,14 +167,14 @@ export function applyValidityRules(stateObj: UserAssetPermsEditorState, assignab
 
   // Step 2: Enable all checkboxes (make them not disabled) before applying
   // the rules
-  for (const [, checkboxName] of Object.entries(CHECKBOX_NAMES)) {
+  for (const [, checkboxName] of recordEntries(CHECKBOX_NAMES)) {
     output = Object.assign(output, {
       [checkboxName + CHECKBOX_DISABLED_SUFFIX]: false,
     })
   }
 
   // Step 3: Apply permissions configuration rules to checkboxes
-  for (const [, checkboxName] of Object.entries(CHECKBOX_NAMES)) {
+  for (const [, checkboxName] of recordEntries(CHECKBOX_NAMES)) {
     if (isAssignable(CHECKBOX_PERM_PAIRS[checkboxName], assignablePerms)) {
       // Apply validity rules only for assignable permissions. We don't touch the rest, because they are not present
       // in the UI, and changing them could lead to bugs (e.g. if a checkbox is disabled, because it's blocked by
@@ -132,7 +188,7 @@ export function applyValidityRules(stateObj: UserAssetPermsEditorState, assignab
 
   // Step 4: For each unchecked partial checkbox, clean up the data of related
   // properties
-  for (const [, checkboxName] of Object.entries(CHECKBOX_NAMES)) {
+  for (const [, checkboxName] of recordEntries(CHECKBOX_NAMES)) {
     if (checkboxName in PARTIAL_BY_USERS_PERM_PAIRS && output[checkboxName] === false) {
       const byUsersCheckboxName = checkboxName as CheckboxNamePartialByUsers
       const listName = getPartialByUsersListName(byUsersCheckboxName)
@@ -192,15 +248,15 @@ export function isPartialByResponsesValid(
 /**
  * Returns only the properties for assignable permissions
  */
-export function getFormData(stateObj: UserAssetPermsEditorState, assignablePerms: AssignablePermsMap): PermsFormData {
-  const output: PermsFormData = {
+export function getFormData(stateObj: UserAssetPermsEditorState, assignablePerms: AssignablePermsMap) {
+  const output: PermsFormDataPartialWithUsername = {
     // We always include username
     username: stateObj.username,
   }
 
   // We loop through all of the checkboxes to see if the permission paired to
   // it is assignable
-  for (const [, checkboxName] of Object.entries(CHECKBOX_NAMES)) {
+  for (const [, checkboxName] of recordEntries(CHECKBOX_NAMES)) {
     if (isAssignable(CHECKBOX_PERM_PAIRS[checkboxName], assignablePerms)) {
       // Add current form data to output
       output[checkboxName] = stateObj[checkboxName]

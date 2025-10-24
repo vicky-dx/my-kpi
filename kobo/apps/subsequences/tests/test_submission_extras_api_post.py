@@ -29,11 +29,13 @@ from kpi.constants import (
     PERM_ADD_SUBMISSIONS,
     PERM_CHANGE_ASSET,
     PERM_CHANGE_SUBMISSIONS,
+    PERM_PARTIAL_SUBMISSIONS,
     PERM_VIEW_ASSET,
     PERM_VIEW_SUBMISSIONS,
 )
 from kpi.models.asset import Asset
 from kpi.tests.base_test_case import BaseTestCase
+from kpi.urls.router_api_v2 import URL_NAMESPACE as ROUTER_URL_NAMESPACE
 from kpi.utils.fuzzy_int import FuzzyInt
 from kpi.utils.xml import (
     edit_submission_xml,
@@ -46,8 +48,11 @@ from ..models import SubmissionExtras
 
 class BaseSubsequenceTestCase(APITestCase):
 
+    fixtures = ['test_data']
+    URL_NAMESPACE = ROUTER_URL_NAMESPACE
+
     def setUp(self):
-        user = User.objects.create_user(username='someuser', email='user@example.com')
+        user = User.objects.get(username='someuser')
         self.asset = Asset(
             owner=user,
             content={'survey': [{'type': 'audio', 'label': 'q1', 'name': 'q1'}]},
@@ -550,7 +555,7 @@ class GoogleNLPSubmissionTest(BaseTestCase):
             'submission': submission_id,
             'q1': {GOOGLETS: {'status': 'requested', 'languageCode': ''}}
         }
-        with self.assertNumQueries(FuzzyInt(49, 65)):
+        with self.assertNumQueries(FuzzyInt(45, 65)):
             res = self.client.post(url, data, format='json')
         self.assertContains(res, 'complete')
         with self.assertNumQueries(FuzzyInt(25, 35)):
@@ -645,6 +650,64 @@ class GoogleNLPSubmissionTest(BaseTestCase):
             res = self.client.post(url, data, format='json')
             self.assertContains(res, 'complete')
 
+    @pytest.mark.skipif(
+        not settings.STRIPE_ENABLED, reason='Requires stripe functionality'
+    )
+    @override_settings(
+        CACHES={'default': {'BACKEND': 'django.core.cache.backends.dummy.DummyCache'}},
+    )
+    @override_config(ASR_MT_INVITEE_USERNAMES='*')
+    @patch('kobo.apps.subsequences.integrations.google.google_translate.translate')
+    @patch('google.cloud.speech.SpeechClient')
+    @patch('google.cloud.storage.Client')
+    def test_google_services_usage_limit_checks_disabled(self, m1, m2, translate):
+        url = reverse('advanced-submission-post', args=[self.asset.uid])
+        submission_id = 'abc123-def456'
+        submission = {
+            '__version__': self.asset.latest_deployed_version.uid,
+            'q1': 'audio_conversion_test_clip.3gp',
+            '_uuid': submission_id,
+            '_attachments': [
+                {
+                    'filename': 'someuser/audio_conversion_test_clip.3gp',
+                    'mimetype': 'video/3gpp',
+                },
+            ],
+            '_submitted_by': self.user.username,
+        }
+        self.asset.deployment.mock_submissions([submission])
+        mock_translation_client = Mock()
+        mock_translation_client.translate_text = Mock(
+            return_value='Test translated text'
+        )
+        translate.TranslationServiceClient = Mock(return_value=mock_translation_client)
+        # Avoid error on isinstance call with this:
+        translate.types = translate_v3.types
+
+        data = {
+            'submission': submission_id,
+            'q1': {GOOGLETS: {'status': 'requested', 'languageCode': ''}},
+        }
+
+        mock_balances = {
+            UsageType.ASR_SECONDS: {'exceeded': True},
+            UsageType.MT_CHARACTERS: {'exceeded': True},
+        }
+        with patch(
+            'kobo.apps.subsequences.api_view.ServiceUsageCalculator.get_usage_balances',
+            return_value=mock_balances,
+        ):
+            data = {
+                'submission': submission_id,
+                'q1': {GOOGLETS: {'status': 'requested', 'languageCode': ''}},
+            }
+            res = self.client.post(url, data, format='json')
+            assert res.status_code == status.HTTP_402_PAYMENT_REQUIRED
+
+            with override_config(USAGE_LIMIT_ENFORCEMENT=False):
+                res = self.client.post(url, data, format='json')
+                self.assertContains(res, 'complete')
+
     @override_settings(
         CACHES={'default': {'BACKEND': 'django.core.cache.backends.dummy.DummyCache'}},
         STRIPE_ENABLED=False,
@@ -715,3 +778,45 @@ class GoogleNLPSubmissionTest(BaseTestCase):
         }
         res = self.client.post(url, data, format='json')
         self.assertContains(res, 'complete')
+
+
+class SubsequencePartialPermissionSubmissionTest(BaseSubsequenceTestCase):
+    """
+    Ensure that users with partial change_submission permission cannot access or
+    update submission supplement data, especially for submissions they are not
+    authorized to view.
+    """
+
+    def test_cannot_post_data(self):
+        anotheruser = User.objects.get(username='anotheruser')
+        partial_perms = {
+            PERM_CHANGE_SUBMISSIONS: [{'_submitted_by': anotheruser.username}]
+        }
+        self.asset.assign_perm(
+            anotheruser, PERM_PARTIAL_SUBMISSIONS, partial_perms=partial_perms
+        )
+        self.client.force_login(anotheruser)
+        url = reverse('advanced-submission-post', args=[self.asset.uid])
+        data = {
+            'submission': self.submission_uuid,
+            'q1': {
+                'transcript': {'value': 'test transcription', 'languageCode': 'en'},
+            },
+        }
+        response = self.client.post(url, data, format='json')
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_cannot_read_data(self):
+        anotheruser = User.objects.get(username='anotheruser')
+        partial_perms = {
+            PERM_VIEW_SUBMISSIONS: [{'_submitted_by': anotheruser.username}]
+        }
+        self.asset.assign_perm(
+            anotheruser, PERM_PARTIAL_SUBMISSIONS, partial_perms=partial_perms
+        )
+        self.client.force_login(anotheruser)
+        url = reverse('advanced-submission-post', args=[self.asset.uid])
+        response = self.client.get(
+            f'{url}?submission={self.submission_uuid}', format='json'
+        )
+        assert response.status_code == status.HTTP_404_NOT_FOUND

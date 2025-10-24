@@ -1,4 +1,3 @@
-# coding: utf-8
 from __future__ import annotations
 
 import json
@@ -19,14 +18,10 @@ from kpi.constants import (
     PREFIX_PARTIAL_PERMS,
     SUFFIX_SUBMISSIONS_PERMS,
 )
-from kpi.fields.relative_prefix_hyperlinked_related import (
-    RelativePrefixHyperlinkedRelatedField,
-)
+from kpi.fields import RelativePrefixHyperlinkedRelatedField
 from kpi.models.asset import Asset, AssetUserPartialPermission
 from kpi.models.object_permission import ObjectPermission
-from kpi.utils.object_permission import (
-    get_user_permission_assignments_queryset,
-)
+from kpi.utils.object_permission import get_user_permission_assignments_queryset
 from kpi.utils.urls import absolute_resolve
 
 ASSIGN_OWNER_ERROR_MESSAGE = "Owner's permissions cannot be assigned explicitly"
@@ -37,7 +32,7 @@ class AssetPermissionAssignmentSerializer(serializers.ModelSerializer):
     user = RelativePrefixHyperlinkedRelatedField(
         view_name='user-kpi-detail',
         lookup_field='username',
-        queryset=User.objects.all(),
+        queryset=User.objects.filter(is_active=True),
         style={'base_template': 'input.html'},  # Render as a simple text box
     )
     permission = RelativePrefixHyperlinkedRelatedField(
@@ -529,7 +524,7 @@ class AssetBulkInsertPermissionSerializer(serializers.Serializer):
         # Create a dictionary of API user URLs to `User` objects
         url_to_user = dict()
         for user in User.objects.only('pk', 'username').filter(
-            username__in=username_to_url.keys()
+            username__in=username_to_url.keys(), is_active=True
         ):
             url = username_to_url[user.username]
             url_to_user[url] = user

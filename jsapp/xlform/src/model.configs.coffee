@@ -77,18 +77,21 @@ module.exports = do ->
   do ->
     class SurveyDetailSchemaItem extends Backbone.Model
       _forSurvey: ()->
-        name: @get("name")
-        label: @get("label")
-        description: @get("description")
-        default: @get("default")
-        deprecated: @get("deprecated")
+        return {
+          name: @get("name")
+          label: @get("label")
+          description: @get("description")
+          default: @get("default")
+          deprecated: @get("deprecated")
+        }
 
     class configs.SurveyDetailSchema extends Backbone.Collection
       model: SurveyDetailSchemaItem
       typeList: ()->
         unless @_typeList
           @_typeList = (item.get("name")  for item in @models)
-        @_typeList
+        return @_typeList
+    return
 
   configs.surveyDetailSchema = new configs.SurveyDetailSchema(_.values(configs.defaultSurveyDetails))
 
@@ -278,6 +281,7 @@ module.exports = do ->
       ["select_one_from_file", "Select one from file"],
       ["select_multiple_from_file", "Select multiple from file"],
       ["xml-external", "External XML"],
+      ["background-geopoint", "Background geopoint", supportedByUI: false],
     ]
 
     class Type
@@ -290,20 +294,20 @@ module.exports = do ->
     exp = (typeId)->
       for tp in types when tp.name is typeId
         output = tp
-      output
+      return output
 
     exp.typeSelectList = do ->
-      () -> types
+      return () -> types
 
-    exp
+    return exp
 
   configs.autoset_kuid = true
 
   configs.columnOrder = do ->
-    (key)->
+    return (key)->
       if -1 is configs.columns.indexOf key
         configs.columns.push(key)
-      configs.columns.indexOf key
+      return configs.columns.indexOf key
 
   configs.newRowDetails =
     name:
@@ -340,7 +344,7 @@ module.exports = do ->
   configs.newGroupDetails =
     name:
       value: ->
-        "group_#{txtid()}"
+        return "group_#{txtid()}"
     label:
       value: "Group"
     type:
@@ -379,4 +383,4 @@ module.exports = do ->
   # Alternative: XLF.configs.boolOutputs = {"true": "yes", "false": "no"}
   configs.boolOutputs = {"true": "true", "false": "false"}
 
-  configs
+  return configs

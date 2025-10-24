@@ -3,6 +3,8 @@ from unittest.mock import patch
 
 from constance import config
 from ddt import data, ddt, unpack
+from django.db.models.signals import pre_delete
+from django.core.management import call_command
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -10,10 +12,16 @@ from django.utils import timezone
 from django_celery_beat.models import PeriodicTask
 from freezegun import freeze_time
 
-from kobo.apps.audit_log.models import AuditAction, AuditLog, AuditType
+from kobo.apps.audit_log.models import (
+    AuditAction,
+    AuditLog,
+    AuditType,
+    ProjectHistoryLog
+)
 from kobo.apps.kobo_auth.shortcuts import User
 from kobo.apps.openrosa.apps.logger.models import Attachment, Instance, XForm
 from kobo.apps.openrosa.apps.logger.models.attachment import AttachmentDeleteStatus
+from kobo.apps.openrosa.apps.logger.signals import pre_delete_attachment
 
 from kpi.models import Asset
 from kpi.tests.mixins.create_asset_and_submission_mixin import AssetSubmissionTestMixin
@@ -640,7 +648,7 @@ class AttachmentTrashTestCase(TestCase, AssetSubmissionTestMixin):
             attachment_id=self.attachment.id
         ).exists()
 
-        self._move_attachment_to_trash(self.attachment, self.user)
+        self._move_attachment_to_trash(self.asset, self.attachment, self.user)
 
         assert self.xform.attachment_storage_bytes == 0
         assert self.user_profile.attachment_storage_bytes == 0
@@ -649,17 +657,19 @@ class AttachmentTrashTestCase(TestCase, AssetSubmissionTestMixin):
             attachment_id=self.attachment.id
         ).exists()
 
-        assert AuditLog.objects.filter(
-            app_label='logger',
-            model_name='attachment',
-            object_id=self.attachment.pk,
+        assert ProjectHistoryLog.objects.filter(
+            app_label='kpi',
+            model_name='asset',
+            object_id=self.asset.pk,
             user=self.user,
             action=AuditAction.IN_TRASH,
-            log_type=AuditType.ATTACHMENT_MANAGEMENT,
+            log_type=AuditType.PROJECT_HISTORY,
         ).exists()
 
     def test_put_back(self):
-        trash_obj = self._move_attachment_to_trash(self.attachment, self.user)
+        trash_obj = self._move_attachment_to_trash(
+            self.asset, self.attachment, self.user
+        )
         self._put_back_attachment_from_trash(self.attachment, self.user)
 
         assert not self.attachment.delete_status
@@ -689,7 +699,9 @@ class AttachmentTrashTestCase(TestCase, AssetSubmissionTestMixin):
         media_file = self.attachment.media_file
         assert self.attachment.media_file.storage.exists(str(media_file))
 
-        trash_obj = self._move_attachment_to_trash(self.attachment, self.user)
+        trash_obj = self._move_attachment_to_trash(
+            self.asset, self.attachment, self.user
+        )
         empty_attachment(trash_obj.pk)
 
         assert Attachment.all_objects.filter(pk=self.attachment.pk).exists()
@@ -744,7 +756,9 @@ class AttachmentTrashTestCase(TestCase, AssetSubmissionTestMixin):
             frozen_time = str(timezone.now())
 
         with freeze_time(frozen_time):
-            self._move_attachment_to_trash(self.attachment, self.user)
+            self._move_attachment_to_trash(
+                self.asset, self.attachment, self.user
+            )
 
         if status != TrashStatus.PENDING:
             # Only tasks that are not pending can be considered as stuck
@@ -771,11 +785,82 @@ class AttachmentTrashTestCase(TestCase, AssetSubmissionTestMixin):
 
                 assert patched_spawned_task.call_count == restart_count
 
-    def _move_attachment_to_trash(self, attachment, user):
+    def test_deleting_submission_deletes_attachment_trash_and_task(self):
+        """
+        Test that if a submission is deleted, any attachment trash entry and its
+        associated periodic task are also deleted.
+        """
+        # Move the attachment to trash
+        trash_obj = self._move_attachment_to_trash(
+            self.asset, self.attachment, self.user
+        )
+        periodic_task_id = trash_obj.periodic_task_id
+
+        # Delete the submission
+        self.instance.delete()
+
+        # Verify that the attachment trash entry and periodic task are deleted
+        self.assertFalse(
+            AttachmentTrash.objects.filter(attachment_id=self.attachment.id).exists()
+        )
+        self.assertFalse(PeriodicTask.objects.filter(pk=periodic_task_id).exists())
+
+    def test_management_command_cleans_up_orphaned_attachment_trash(self):
+        """
+        Test that the management command `cleanup_orphan_attachment_trash`
+        cleans up orphaned (whose Attachment object is already deleted)
+        AttachmentTrash entries and their associated periodic tasks.
+        """
+        # Move the attachment to trash
+        trash_obj = self._move_attachment_to_trash(
+            self.asset, self.attachment, self.user
+        )
+        periodic_task_id = trash_obj.periodic_task_id
+
+        # Temporarily disconnect the pre_delete signal handler so it does not run
+        pre_delete.disconnect(receiver=pre_delete_attachment, sender=Attachment)
+        try:
+            # Delete the attachment
+            self.attachment.delete()
+
+            # Verify that the Attachment object is deleted but the AttachmentTrash
+            # entry and periodic task still exist
+            self.assertFalse(Attachment.all_objects.filter(pk=self.attachment.pk).exists())
+            self.assertTrue(AttachmentTrash.objects.filter(pk=trash_obj.pk).exists())
+            self.assertTrue(PeriodicTask.objects.filter(pk=periodic_task_id).exists())
+
+            call_command('cleanup_orphan_attachment_trash')
+        finally:
+            pre_delete.connect(pre_delete_attachment, sender=Attachment)
+
+        # Verify that the orphaned AttachmentTrash entry and periodic task are deleted
+        self.assertFalse(
+            AttachmentTrash.objects.filter(attachment_id=self.attachment.id).exists()
+        )
+        self.assertFalse(PeriodicTask.objects.filter(pk=periodic_task_id).exists())
+
+    def test_deleting_attachment_directly_without_attachment_trash_does_not_fail(self):
+        """
+        Ensure that deleting an Attachment that was never moved to trash does
+        not raise any exception and cleans up properly.
+        """
+        # Ensure no trash exists
+        self.assertFalse(
+            AttachmentTrash.objects.filter(attachment_id=self.attachment.pk).exists()
+        )
+
+        self.attachment.delete()
+
+        # Attachment must be gone
+        self.assertFalse(Attachment.all_objects.filter(pk=self.attachment.pk).exists())
+
+    def _move_attachment_to_trash(self, asset, attachment, user):
         move_to_trash(
             request_author=user,
             objects_list=[{
                 'pk': attachment.pk,
+                'asset_id': asset.pk,
+                'asset_uid': asset.uid,
                 'attachment_uid': attachment.uid,
                 'attachment_basename': attachment.media_file_basename,
             }],

@@ -7,11 +7,13 @@ import KoboModal from '#/components/modals/koboModal'
 import KoboModalContent from '#/components/modals/koboModalContent'
 import KoboModalFooter from '#/components/modals/koboModalFooter'
 import KoboModalHeader from '#/components/modals/koboModalHeader'
+import { recordValues } from '#/utils'
 import type { ProjectFieldName } from './constants'
-import { DEFAULT_VISIBLE_FIELDS, PROJECT_FIELDS } from './constants'
+import { PROJECT_FIELDS } from './constants'
 import styles from './projectsFieldsSelector.module.scss'
 
 interface ProjectsFieldsSelectorProps {
+  defaultVisibleFields: ProjectFieldName[]
   /** Selected fields. If the settings don't exist yet, we accept undefined. */
   selectedFields: ProjectFieldName[] | undefined
   /**
@@ -28,7 +30,7 @@ export default function ProjectsFieldsSelector(props: ProjectsFieldsSelectorProp
   const getInitialSelectedFields = () => {
     let outcome: ProjectFieldName[] = []
     if (!props.selectedFields || props.selectedFields.length === 0) {
-      outcome = DEFAULT_VISIBLE_FIELDS
+      outcome = props.defaultVisibleFields
     } else {
       outcome = Array.from(props.selectedFields)
     }
@@ -64,7 +66,7 @@ export default function ProjectsFieldsSelector(props: ProjectsFieldsSelectorProp
   }
 
   const getCheckboxes = (): MultiCheckboxItem[] =>
-    Object.values(PROJECT_FIELDS)
+    recordValues(PROJECT_FIELDS)
       .filter((fieldDefinition) => !props.excludedFields?.includes(fieldDefinition.name))
       .map((field) => {
         return {

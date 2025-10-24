@@ -26,6 +26,7 @@ class ObjectPermissionSerializer(serializers.ModelSerializer):
         source='asset',
         view_name='asset-detail',
         lookup_field='uid',
+        lookup_url_kwarg='uid_asset',
         queryset=Asset.objects.all(),
         style={'base_template': 'input.html'}  # Render as a simple text box
     )
@@ -53,12 +54,6 @@ class ObjectPermissionSerializer(serializers.ModelSerializer):
         asset = validated_data['content_object']
         user = validated_data['user']
         perm = validated_data['permission'].codename
-        # TODO: Remove after kobotoolbox/kobocat#642
-        # I'm looking forward to the merge conflict this creates, aren't you?
-        if getattr(asset, 'has_deployment', False):
-            asset.deployment.remove_from_kc_only_flag(
-                specific_user=user
-            )
         return asset.assign_perm(user, perm)
 
 

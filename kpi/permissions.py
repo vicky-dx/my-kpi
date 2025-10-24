@@ -11,6 +11,7 @@ from rest_framework.permissions import IsAuthenticated as DRFIsAuthenticated
 from kpi.constants import (
     PERM_ADD_SUBMISSIONS,
     PERM_CHANGE_METADATA_ASSET,
+    PERM_CHANGE_SUBMISSIONS,
     PERM_PARTIAL_SUBMISSIONS,
     PERM_VIEW_ASSET,
     PERM_VIEW_SUBMISSIONS,
@@ -19,9 +20,7 @@ from kpi.exceptions import DeploymentNotFound
 from kpi.mixins.validation_password_permission import ValidationPasswordPermissionMixin
 from kpi.models.asset import Asset, AssetSnapshot
 from kpi.utils.object_permission import get_database_user
-from kpi.utils.project_views import (
-    user_has_project_view_asset_perm,
-)
+from kpi.utils.project_views import user_has_project_view_asset_perm
 
 
 # FIXME: Move to `object_permissions` module.
@@ -124,6 +123,13 @@ class BaseAssetNestedObjectPermission(permissions.BasePermission):
         return True
 
 
+def user_can_modify_advanced_features(asset, user, request):
+    if list(request.data.keys()) != ['advanced_features']:
+        return False
+    if asset.has_perm(user, PERM_CHANGE_SUBMISSIONS):
+        return True
+
+
 class AssetPermission(
     ValidationPasswordPermissionMixin, permissions.DjangoObjectPermissions
 ):
@@ -150,8 +156,9 @@ class AssetPermission(
         method = request._request.method
         if (
             method == 'PATCH'
-            and user_has_project_view_asset_perm(
-                obj, user, PERM_CHANGE_METADATA_ASSET
+            and (
+                user_has_project_view_asset_perm(obj, user, PERM_CHANGE_METADATA_ASSET)
+                or user_can_modify_advanced_features(obj, user, request)
             )
         ) or (
             method == 'GET'
@@ -232,6 +239,7 @@ class AssetEditorPermission(AssetNestedObjectPermission):
         - Reads need 'view_asset' permission
         - Writes need 'change_asset' permission
     """
+
     perms_map = deepcopy(AssetNestedObjectPermission.perms_map)
     perms_map['POST'] = ['%(app_label)s.change_asset']
     perms_map['PUT'] = perms_map['POST']
@@ -283,6 +291,17 @@ class AssetSnapshotPermission(AssetPermission):
                     'model_name': model_name,
                 }
 
+    def has_permission(self, request, view):
+        self.validate_password(request)
+
+        # Allow anonymous users to send POST requests to preview public forms.
+        # Object-level access control is handled by the serializer, ensuring
+        # that only public forms can be accessed or previewed.
+        if request.method == 'POST' and view.action == 'create':
+            return True
+
+        return super().has_permission(request, view)
+
     def has_object_permission(self, request, view, obj):
         if view.action == 'submission' or (
             view.action == 'retrieve' and request.accepted_renderer.format == 'xml'
@@ -327,6 +346,7 @@ class PostMappedToChangePermission(IsOwnerOrReadOnly):
     Maps POST requests to the change_model permission instead of DRF's default
     of add_model
     """
+
     perms_map = deepcopy(IsOwnerOrReadOnly.perms_map)
     perms_map['POST'] = ['%(app_label)s.change_%(model_name)s']
 
@@ -389,6 +409,25 @@ class SubmissionPermission(AssetNestedObjectPermission):
         return user_permissions
 
 
+class AdvancedSubmissionPermission(SubmissionPermission):
+    """
+    Regular `SubmissionPermission` maps POST to `add_submissions`, but
+    `change_submissions` should be required here
+    """
+
+    perms_map = deepcopy(SubmissionPermission.perms_map)
+    perms_map['POST'] = ['%(app_label)s.change_%(model_name)s']
+
+    def _get_user_permissions(
+        self, asset: Asset, user: 'settings.AUTH_USER_MODEL'
+    ) -> list:
+        """
+        Overrides parent method to exclude partial permissions
+        """
+
+        return super(SubmissionPermission, self)._get_user_permissions(asset, user)
+
+
 class AttachmentDeletionPermission(SubmissionPermission):
     """
     Permissions for deleting attachments.
@@ -449,7 +488,7 @@ class EditSubmissionPermission(EditLinkSubmissionPermission):
         try:
             return super().has_permission(request, view)
         except Http404:
-            uid = request.parser_context['kwargs']['uid']
+            uid = request.parser_context['kwargs']['uid_asset_snapshot']
             # Is this a real 404 (object does not exist)? If so, raise it
             if not AssetSnapshot.objects.filter(uid=uid).exists():
                 raise

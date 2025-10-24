@@ -3,8 +3,15 @@ import copy
 import requests
 from django.conf import settings
 from django.http import Http404, HttpResponseRedirect
+from drf_spectacular.utils import (
+    OpenApiExample,
+    OpenApiParameter,
+    extend_schema,
+    extend_schema_view,
+)
 from rest_framework import renderers, serializers, status
 from rest_framework.decorators import action
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.reverse import reverse
 
@@ -16,36 +23,302 @@ from kpi.exceptions import SubmissionIntegrityError
 from kpi.filters import RelatedAssetPermissionsFilter
 from kpi.highlighters import highlight_xform
 from kpi.models import AssetFile, AssetSnapshot, PairedData
+from kpi.parsers import RawFilenameMultiPartParser
 from kpi.permissions import AssetSnapshotPermission, EditSubmissionPermission
 from kpi.renderers import (
     OpenRosaFormListRenderer,
     OpenRosaManifestRenderer,
     XMLRenderer,
 )
+from kpi.schema_extensions.v2.asset_snapshots.schema import (
+    ASSET_SNAPSHOT_DETAILS_SCHEMA,
+    ASSET_SNAPSHOT_SOURCE_SCHEMA,
+)
+from kpi.schema_extensions.v2.asset_snapshots.serializers import (
+    AssetSnapshotCreateRequest,
+    AssetSnapshotResponse,
+)
+from kpi.schema_extensions.v2.generic.schema import ASSET_URL_SCHEMA
+from kpi.schema_extensions.v2.openrosa.serializers import (
+    OpenRosaFormListResponse,
+    OpenRosaManifestResponse,
+    OpenRosaSubmissionRequest,
+    OpenRosaSubmissionResponse,
+    OpenRosaXFormResponse,
+)
 from kpi.serializers.v2.asset_snapshot import AssetSnapshotSerializer
 from kpi.serializers.v2.open_rosa import FormListSerializer, ManifestSerializer
 from kpi.tasks import enketo_flush_cached_preview
+from kpi.utils.schema_extensions.examples import generate_example_from_schema
+from kpi.utils.schema_extensions.markdown import read_md
+from kpi.utils.schema_extensions.response import (
+    open_api_200_ok_response,
+    open_api_201_created_response,
+    open_api_204_empty_response,
+    open_api_302_found,
+)
 from kpi.utils.xml import XMLFormWithDisclaimer
-from kpi.views.no_update_model import NoUpdateModelViewSet
+from kpi.versioning import OpenRosaAPIVersioning
 from kpi.views.v2.open_rosa import OpenRosaViewSetMixin
 
 
+@extend_schema_view(
+    # description for list
+    list=extend_schema(
+        description=read_md('kpi', 'asset_snapshots/list.md'),
+        request=None,
+        responses=open_api_200_ok_response(
+            AssetSnapshotResponse,
+            validate_payload=False,
+            raise_access_forbidden=False,
+            raise_not_found=False,
+        ),
+        tags=['Form content'],
+    ),
+    # description for get item
+    retrieve=extend_schema(
+        description=read_md('kpi', 'asset_snapshots/retrieve.md'),
+        responses=open_api_200_ok_response(
+            AssetSnapshotResponse,
+            validate_payload=False,
+            raise_access_forbidden=False,
+        ),
+        tags=['Form content'],
+        parameters=[
+            OpenApiParameter(
+                name='uid_asset_snapshot',
+                type=str,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description='UID of the asset snapshot',
+            ),
+        ],
+    ),
+    # description for post
+    create=extend_schema(
+        description=read_md('kpi', 'asset_snapshots/create.md'),
+        request={'application/json': AssetSnapshotCreateRequest},
+        responses=open_api_201_created_response(
+            AssetSnapshotResponse,
+            raise_access_forbidden=False,
+            raise_not_found=False,
+        ),
+        examples=[
+            OpenApiExample(
+                name='Using asset',
+                value={
+                    'asset': generate_example_from_schema(ASSET_URL_SCHEMA),
+                    'details': generate_example_from_schema(
+                        ASSET_SNAPSHOT_DETAILS_SCHEMA
+                    ),
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                name='Using source',
+                value={
+                    'source': generate_example_from_schema(
+                        ASSET_SNAPSHOT_SOURCE_SCHEMA
+                    ),
+                    'details': generate_example_from_schema(
+                        ASSET_SNAPSHOT_DETAILS_SCHEMA
+                    ),
+                },
+                request_only=True,
+            ),
+        ],
+        tags=['Form content'],
+    ),
+    # description for delete
+    destroy=extend_schema(
+        description=read_md('kpi', 'asset_snapshots/delete.md'),
+        responses=open_api_204_empty_response(
+            validate_payload=False,
+            raise_access_forbidden=False,
+        ),
+        tags=['Form content'],
+        parameters=[
+            OpenApiParameter(
+                name='uid_asset_snapshot',
+                type=str,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description='UID of the asset snapshot',
+            ),
+        ],
+    ),
+    update=extend_schema(
+        exclude=True,
+    ),
+    partial_update=extend_schema(
+        exclude=True,
+    ),
+    form_list=extend_schema(
+        description=read_md('kpi', 'openrosa/form_list.md'),
+        responses=open_api_200_ok_response(
+            OpenRosaFormListResponse,
+            media_type='application/xml',
+            require_auth=False,
+            validate_payload=False,
+            raise_access_forbidden=False,
+            error_media_type='text/html',
+        ),
+        tags=['OpenRosa Form List'],
+        parameters=[
+            OpenApiParameter(
+                name='uid_asset_snapshot',
+                type=str,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description='UID of the asset snapshot',
+            ),
+        ],
+    ),
+    manifest=extend_schema(
+        description=read_md('kpi', 'openrosa/manifest.md'),
+        responses=open_api_200_ok_response(
+            OpenRosaManifestResponse,
+            media_type='application/xml',
+            require_auth=False,
+            validate_payload=False,
+            raise_access_forbidden=False,
+            error_media_type='text/html',
+        ),
+        tags=['OpenRosa Form Manifest'],
+        parameters=[
+            OpenApiParameter(
+                name='uid_asset_snapshot',
+                type=str,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description='UID of the asset snapshot',
+            ),
+        ],
+    ),
+    submission=extend_schema(
+        description=read_md('kpi', 'openrosa/submission.md'),
+        request={'multipart/form-data': OpenRosaSubmissionRequest},
+        responses=open_api_201_created_response(
+            OpenRosaSubmissionResponse,
+            media_type='text/xml',
+            validate_payload=False,
+            raise_access_forbidden=False,
+            raise_not_found=False,
+        ),
+        tags=['OpenRosa Form Submission'],
+        parameters=[
+            OpenApiParameter(
+                name='uid_asset_snapshot',
+                type=str,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description='UID of the asset snapshot',
+            ),
+        ],
+    ),
+    preview=extend_schema(
+        description=read_md('kpi', 'asset_snapshots/preview.md'),
+        responses=open_api_302_found(
+            media_type='text/html',
+            require_auth=False,
+            validate_payload=False,
+            raise_access_forbidden=False,
+        ),
+        tags=['Form content'],
+        parameters=[
+            OpenApiParameter(
+                name='uid_asset_snapshot',
+                type=str,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description='UID of the asset snapshot',
+            ),
+        ],
+    ),
+    xform=extend_schema(
+        description=read_md('kpi', 'asset_snapshots/xform.md'),
+        responses=open_api_200_ok_response(
+            OpenRosaXFormResponse,
+            media_type='application/xml',
+            require_auth=False,
+            validate_payload=False,
+            raise_access_forbidden=False,
+            error_media_type='text/html',
+        ),
+        tags=['Form content'],
+        parameters=[
+            OpenApiParameter(
+                name='uid_asset_snapshot',
+                type=str,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description='UID of the asset snapshot',
+            ),
+        ],
+    ),
+    xml_with_disclaimer=extend_schema(
+        description=read_md('kpi', 'asset_snapshots/xml_with_disclaimer.md'),
+        responses=open_api_200_ok_response(
+            OpenRosaXFormResponse,
+            require_auth=False,
+            validate_payload=False,
+            raise_access_forbidden=False,
+        ),
+        tags=['Form content'],
+        parameters=[
+            OpenApiParameter(
+                name='uid_asset_snapshot',
+                type=str,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description='UID of the asset snapshot',
+            ),
+        ],
+    ),
+)
 class AssetSnapshotViewSet(OpenRosaViewSetMixin, AuditLoggedNoUpdateModelViewSet):
 
     """
-    <span class='label label-danger'>TODO Documentation for this endpoint</span>
+    ViewSet for managing the current user's asset snapshots
 
-    ### CURRENT ENDPOINT
+    Available actions:
+    - list          → GET /api/v2/asset_snapshots/
+    - create        → POST /api/v2/asset_snapshots/
+    - retrieve      → GET /api/v2/asset_snapshots/{uid_asset_snapshot}/
+    - patch         → PATCH /api/v2/asset_snapshots/{uid_asset_snapshot}/
+    - delete        → DELETE /api/v2/asset_snapshots/{uid_asset_snapshot}/
+    - xform         → GET /api/v2/asset_snapshots/{uid_asset_snapshot}/xform/
+    - xml_with_disclaimer       → GET /api/v2/asset_snapshots/{uid_asset_snapshot}/xml_with_disclaimer/
+    - preview       → GET /api/v2/asset_snapshots/{uid_asset_snapshot}/preview/
+
+    Documentation:
+    - docs/api/v2/asset_snapshots/list.md
+    - docs/api/v2/asset_snapshots/create.md
+    - docs/api/v2/asset_snapshots/retrieve.md
+    - docs/api/v2/asset_snapshots/patch.md
+    - docs/api/v2/asset_snapshots/delete.md
+    - docs/api/v2/asset_snapshots/xform.md
+    - docs/api/v2/asset_snapshots/xml_with_disclaimer.md
+    - docs/api/v2/asset_snapshots/preview.md
+
+
+
+    OpenRosa Endpoints Documentation
+    - formlist       → GET /api/v2/asset_snapshots/{uid_asset_snapshot}/formList
+    - docs/api/v2/openrosa/form_list.md
+
+    - manifest       → GET /api/v2/asset_snapshots/{uid_asset_snapshot}/manifest
+    - docs/api/v2/openrosa/manifest.md
+
+    - submission     → GET /api/v2/asset_snapshots/{uid_asset_snapshot}/submission
+    - docs/api/v2/openrosa/submission.md
     """
 
     serializer_class = AssetSnapshotSerializer
-    lookup_field = 'uid'
+    lookup_field = 'uid_asset_snapshot'
     queryset = AssetSnapshot.objects.all()
     permission_classes = [AssetSnapshotPermission]
 
-    renderer_classes = NoUpdateModelViewSet.renderer_classes + [
-        XMLRenderer,
-    ]
     log_type = AuditType.PROJECT_HISTORY
 
     @property
@@ -85,6 +358,7 @@ class AssetSnapshotViewSet(OpenRosaViewSetMixin, AuditLoggedNoUpdateModelViewSet
         detail=True,
         renderer_classes=[OpenRosaFormListRenderer],
         url_path='formList',
+        versioning_class=OpenRosaAPIVersioning,
     )
     def form_list(self, request, *args, **kwargs):
         """
@@ -117,9 +391,15 @@ class AssetSnapshotViewSet(OpenRosaViewSetMixin, AuditLoggedNoUpdateModelViewSet
 
         return self._add_disclaimer(snapshot)
 
+    def get_renderers(self):
+        if self.action == 'retrieve':
+            return [JSONRenderer(), XMLRenderer()]
+        return super().get_renderers()
+
     @action(
         detail=True,
         renderer_classes=[OpenRosaManifestRenderer],
+        versioning_class=OpenRosaAPIVersioning,
     )
     def manifest(self, request, *args, **kwargs):
         """
@@ -159,7 +439,7 @@ class AssetSnapshotViewSet(OpenRosaViewSetMixin, AuditLoggedNoUpdateModelViewSet
             data = {
                 'server_url': reverse(
                     viewname='assetsnapshot-detail',
-                    kwargs={'uid': snapshot.uid},
+                    kwargs={'uid_asset_snapshot': snapshot.uid},
                     request=request,
                 ),
                 'form_id': snapshot.uid,
@@ -203,6 +483,8 @@ class AssetSnapshotViewSet(OpenRosaViewSetMixin, AuditLoggedNoUpdateModelViewSet
             DigestAuthentication,
             EnketoSessionAuthentication,
         ],
+        versioning_class=OpenRosaAPIVersioning,
+        parser_classes=[RawFilenameMultiPartParser],
     )
     def submission(self, request, *args, **kwargs):
         """ Implements the OpenRosa Form Submission API """
@@ -211,7 +493,6 @@ class AssetSnapshotViewSet(OpenRosaViewSetMixin, AuditLoggedNoUpdateModelViewSet
 
         asset_snapshot = self.get_object()
         xml_submission_file = request.data['xml_submission_file']
-
         # Remove 'xml_submission_file' since it is already handled
         request.FILES.pop('xml_submission_file')
         try:
@@ -253,7 +534,7 @@ class AssetSnapshotViewSet(OpenRosaViewSetMixin, AuditLoggedNoUpdateModelViewSet
                                                                  **options)
         return Response(response_data, template_name='highlighted_xform.html')
 
-    @action(detail=True)
+    @action(detail=True, renderer_classes=[XMLRenderer])
     def xml_with_disclaimer(self, request, *args, **kwargs):
         """
         Same behaviour as `retrieve()` from DRF, but makes it easier to target

@@ -24,6 +24,7 @@ module.exports = do ->
   templates['row.mandatorySettingSelector'] = row_templates.mandatorySettingSelector
   templates['row.rowErrorView']             = row_templates.rowErrorView
   templates['row.xlfRowView']               = row_templates.xlfRowView
+  templates['row.unsupportedRowView']       = row_templates.unsupportedRowView
   templates['row.scoreView']                = row_templates.scoreView
   templates['row.rankView']                 = row_templates.rankView
   templates['surveyApp']                    = surveyApp_templates.surveyApp
@@ -40,8 +41,8 @@ module.exports = do ->
       throw new Error("Template not available: '#{id}'")
     unless 'function' is typeof template
       throw new Error("Template not a function: '#{id}'")
-    template(params...)
+    return template(params...)
 
   templates.$$render = $$render
 
-  templates
+  return templates
